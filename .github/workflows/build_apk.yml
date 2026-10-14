@@ -23,7 +23,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Build Native Android 2D RPG APK
+      - name: Build Native Android 2D RPG APK (HD Visual Upgrade)
         run: |
           set -e
           rm -rf build_tmp
@@ -40,12 +40,13 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="org.aether.rpg"
-              android:versionCode="1"
-              android:versionName="1.0">
+              android:versionCode="2"
+              android:versionName="2.0">
               <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="33" />
               <uses-permission android:name="android.permission.INTERNET" />
               <application
                   android:label="@string/app_name"
+                  android:hardwareAccelerated="true"
                   android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
                   <activity
                       android:name=".MainActivity"
@@ -71,8 +72,13 @@ jobs:
           import android.content.SharedPreferences;
           import android.graphics.Canvas;
           import android.graphics.Color;
+          import android.graphics.LinearGradient;
           import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.RadialGradient;
           import android.graphics.RectF;
+          import android.graphics.Shader;
+          import android.graphics.Typeface;
           import android.os.Bundle;
           import android.view.MotionEvent;
           import android.view.View;
@@ -87,6 +93,7 @@ jobs:
           import java.net.HttpURLConnection;
           import java.net.URL;
           import java.util.ArrayList;
+          import java.util.Random;
 
           public class MainActivity extends Activity {
               static class Choice {
@@ -98,30 +105,54 @@ jobs:
                   int x, y;
                   ArrayList<Choice> choices = new ArrayList<Choice>();
               }
+              static class FloatText {
+                  String text;
+                  float gx, gy, offsetY, alpha;
+                  int color;
+                  FloatText(String t, float x, float y, int c) {
+                      text = t; gx = x; gy = y; offsetY = 0f; alpha = 1f; color = c;
+                  }
+              }
+              static class Particle {
+                  float rx, ry, vx, vy, size, alpha;
+                  Particle(Random rnd) {
+                      rx = rnd.nextFloat();
+                      ry = rnd.nextFloat();
+                      vx = (rnd.nextFloat() - 0.5f) * 0.0018f;
+                      vy = -0.0008f - rnd.nextFloat() * 0.0015f;
+                      size = 2.5f + rnd.nextFloat() * 4.5f;
+                      alpha = 0.3f + rnd.nextFloat() * 0.7f;
+                  }
+              }
 
-              int chapter = 1, hp = 100, mana = 30, gold = 50;
+              int chapter = 1, hp = 100, maxHp = 120, mana = 40, maxMana = 100, gold = 50;
               String chapterTitle = "遺落星門的甦醒", biome = "ruins", trait = "中立探索者";
               ArrayList<String> inventory = new ArrayList<String>();
               ArrayList<String> history = new ArrayList<String>();
               ArrayList<String> logs = new ArrayList<String>();
               ArrayList<Entity> entities = new ArrayList<Entity>();
+              ArrayList<FloatText> floatTexts = new ArrayList<FloatText>();
+              ArrayList<Particle> particles = new ArrayList<Particle>();
 
               final int COLS = 12, ROWS = 7;
               int[][] grid = new int[ROWS][COLS];
               int px = 2, py = 3;
+              float renderPx = 2f, renderPy = 3f;
               boolean isGenerating = false;
               String apiKey = "";
               GameView gameView;
+              Random rnd = new Random();
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   SharedPreferences sp = getSharedPreferences("gemini4_rpg", Context.MODE_PRIVATE);
                   apiKey = sp.getString("api_key", "");
+                  for (int i = 0; i < 28; i++) particles.add(new Particle(rnd));
                   inventory.add("古舊星盤");
                   history.add("第1章開始：帶著古舊星盤在星門遺跡甦醒。");
-                  addLog("🌟 歡迎來到《星界迴響》Android 原生 2D 版！");
-                  addLog("👉 點擊 2D 地圖格子或下方方向鍵移動；走進右側紫圈即可讓 Gemini 4 根據你的遊玩過程生成新章節！");
+                  addLog("🌟 歡迎來到《星界迴響》HD 視覺升級版！");
+                  addLog("👉 點擊 2D 地圖或下方按鈕移動；走進右側發光「時空裂隙」即可讓 Gemini 4 根據你的遊玩過程生成新章節！");
                   initChapter1();
                   gameView = new GameView(this);
                   setContentView(gameView);
@@ -129,7 +160,11 @@ jobs:
 
               void addLog(String s) {
                   logs.add(s);
-                  if (logs.size() > 8) logs.remove(0);
+                  if (logs.size() > 7) logs.remove(0);
+              }
+
+              void spawnFloat(String text, float x, float y, int color) {
+                  floatTexts.add(new FloatText(text, x, y, color));
               }
 
               void resetBorders() {
@@ -161,7 +196,7 @@ jobs:
 
                   Entity chest = new Entity();
                   chest.id = "chest1"; chest.type = "chest"; chest.name = "星塵寶箱"; chest.x = 6; chest.y = 2;
-                  chest.greeting = "你在遺跡間發現一座刻滿符文的星塵寶箱。";
+                  chest.greeting = "你在遺跡間發現一座刻滿金色符文的星塵寶箱。";
                   Choice cc = new Choice();
                   cc.label = "🔓 用星盤共鳴解鎖（星幣+45，獲「記憶水晶」）";
                   cc.gold = 45; cc.item = "記憶水晶"; cc.log = "開啟星塵寶箱取得記憶水晶。";
@@ -191,20 +226,22 @@ jobs:
               void movePlayer(int dx, int dy) {
                   if (isGenerating) return;
                   int nx = px + dx, ny = py + dy;
-                  if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS || grid[ny][nx] == 1) return;
+                  if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS || grid[ny][nx] == 1) {
+                      spawnFloat("受阻", nx, ny, Color.rgb(148, 163, 184));
+                      return;
+                  }
                   for (Entity e : entities) {
                       if (e.x == nx && e.y == ny) {
                           interactEntity(e);
-                          gameView.invalidate();
                           return;
                       }
                   }
                   px = nx; py = ny;
                   if (grid[ny][nx] == 2) {
                       hp = Math.max(1, hp - 2);
-                      addLog("⚠️ 踏入能量地形，HP -2");
+                      spawnFloat("-2 HP 能量地形", px, py, Color.rgb(244, 63, 94));
+                      addLog("⚠️ 踏入星界能量旋渦，HP -2");
                   }
-                  gameView.invalidate();
               }
 
               void interactNearby() {
@@ -214,7 +251,7 @@ jobs:
                           return;
                       }
                   }
-                  Toast.makeText(this, "請先靠近地圖上的角色、寶箱或紫色裂隙", Toast.LENGTH_SHORT).show();
+                  spawnFloat("周圍無目標", px, py, Color.rgb(203, 213, 225));
               }
 
               void interactEntity(final Entity e) {
@@ -242,16 +279,20 @@ jobs:
               }
 
               void applyChoice(Entity e, Choice c) {
-                  hp = Math.max(1, Math.min(200, hp + c.hp));
-                  mana = Math.max(0, mana + c.mana);
+                  hp = Math.max(1, Math.min(maxHp, hp + c.hp));
+                  mana = Math.max(0, Math.min(maxMana, mana + c.mana));
                   gold = Math.max(0, gold + c.gold);
+                  if (c.hp != 0) spawnFloat((c.hp > 0 ? "+" : "") + c.hp + " HP", px, py, c.hp > 0 ? Color.rgb(52, 211, 153) : Color.rgb(251, 113, 133));
+                  if (c.mana != 0) spawnFloat((c.mana > 0 ? "+" : "") + c.mana + " 共鳴", px, py - 0.35f, Color.rgb(129, 140, 248));
                   if (c.trait != null && !c.trait.isEmpty()) trait = c.trait;
-                  if (c.item != null && !c.item.isEmpty() && !inventory.contains(c.item)) inventory.add(c.item);
+                  if (c.item != null && !c.item.isEmpty() && !inventory.contains(c.item)) {
+                      inventory.add(c.item);
+                      spawnFloat("獲得 " + c.item, e.x, e.y, Color.rgb(251, 191, 36));
+                  }
                   history.add("第" + chapter + "章：" + c.log);
                   addLog("👉 " + c.log);
                   if (c.reply != null && !c.reply.isEmpty()) addLog("💬 " + c.reply);
                   if ("chest".equals(e.type) || "monster".equals(e.type)) entities.remove(e);
-                  gameView.invalidate();
               }
 
               void promptCustomAction(final Entity e) {
@@ -265,12 +306,12 @@ jobs:
                           public void onClick(DialogInterface d, int w) {
                               String act = et.getText().toString().trim();
                               if (!act.isEmpty()) {
-                                  mana += 10;
+                                  mana = Math.min(maxMana, mana + 12);
                                   trait = "自由破局者";
                                   String log = "對「" + e.name + "」執行自由行動：「" + act + "」";
                                   history.add("第" + chapter + "章：" + log);
                                   addLog("⚡ " + log + "（已記入下一章劇情種子！）");
-                                  gameView.invalidate();
+                                  spawnFloat("✨ 自由破局 +12 共鳴", px, py, Color.rgb(56, 189, 248));
                               }
                           }
                       })
@@ -281,18 +322,19 @@ jobs:
               void openApiKeyDialog() {
                   LinearLayout layout = new LinearLayout(this);
                   layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(36, 20, 36, 10);
                   final EditText keyEt = new EditText(this);
                   keyEt.setHint("貼上 Google AI Studio 的 Gemini API Key (選填)");
                   keyEt.setText(apiKey);
                   final EditText wishEt = new EditText(this);
-                  wishEt.setHint("或輸入下一章劇情許願（如：出現巨龍、機械迷宮）");
+                  wishEt.setHint("或輸入下一章劇情許願（如：機械迷宮、緋紅巨龍）");
                   layout.addView(keyEt);
                   layout.addView(wishEt);
 
                   new AlertDialog.Builder(this)
-                      .setTitle("⚙️ Gemini 4 引擎設定與劇情許願")
+                      .setTitle("⚙️ Gemini 4 動態引擎 ＆ 劇情許願")
                       .setView(layout)
-                      .setPositiveButton("儲存並生成下一章", new DialogInterface.OnClickListener() {
+                      .setPositiveButton("✨ 立即生成下一章", new DialogInterface.OnClickListener() {
                           @Override
                           public void onClick(DialogInterface d, int w) {
                               apiKey = keyEt.getText().toString().trim();
@@ -302,7 +344,7 @@ jobs:
                               generateNextChapter(wish);
                           }
                       })
-                      .setNeutralButton("僅儲存金鑰", new DialogInterface.OnClickListener() {
+                      .setNeutralButton("💾 僅儲存金鑰", new DialogInterface.OnClickListener() {
                           @Override
                           public void onClick(DialogInterface d, int w) {
                               apiKey = keyEt.getText().toString().trim();
@@ -311,15 +353,14 @@ jobs:
                               Toast.makeText(MainActivity.this, "已儲存 API Key！", Toast.LENGTH_SHORT).show();
                           }
                       })
-                      .setNegativeButton("取消", null)
+                      .setNegativeButton("關閉", null)
                       .show();
               }
 
               void generateNextChapter(final String wish) {
                   if (isGenerating) return;
                   isGenerating = true;
-                  addLog("⏳ 正在根據你的遊玩歷程生成第 " + (chapter + 1) + " 章...");
-                  gameView.invalidate();
+                  addLog("⏳ 正在根據你的遊玩歷程編織第 " + (chapter + 1) + " 章世界...");
 
                   new Thread(new Runnable() {
                       @Override
@@ -333,7 +374,7 @@ jobs:
                                   runOnUiThread(new Runnable() {
                                       @Override
                                       public void run() {
-                                          addLog("⚠️ API 連線提示 (" + msg + ")，已使用內建動態引擎生成！");
+                                          addLog("⚠️ 雲端提示 (" + msg + ")，已使用內建因果引擎生成！");
                                       }
                                   });
                               }
@@ -344,7 +385,6 @@ jobs:
                               public void run() {
                                   applyNewChapter(finalData);
                                   isGenerating = false;
-                                  gameView.invalidate();
                               }
                           });
                       }
@@ -354,10 +394,10 @@ jobs:
               JSONObject callGemini4Api(String wish) throws Exception {
                   int nextNum = chapter + 1;
                   String prompt = "你是 2D 遊戲《星界迴響》的動態劇本引擎。請根據玩家的遊玩過程生成第 " + nextNum + " 章 JSON。"
-                      + "玩家目前傾向：" + trait + "，背包：" + inventory.toString()
+                      + "玩家傾向：" + trait + "，背包：" + inventory.toString()
                       + "，過往紀錄：" + history.toString()
                       + "，額外願望：" + (wish.isEmpty() ? "依過往選擇延續" : wish)
-                      + "。請只回傳純 JSON 物件：{\"chapterTitle\":\"標題\",\"biome\":\"forest或cyber或volcano\",\"openingNarration\":\"開場劇情(50字內)\",\"npcName\":\"新NPC名\",\"npcGreeting\":\"台詞\",\"choice1Label\":\"選項1\",\"choice1Item\":\"新道具\",\"choice1Reply\":\"回應1\",\"choice2Label\":\"選項2\",\"choice2Reply\":\"回應2\",\"chestName\":\"寶箱名\",\"chestItem\":\"寶物名\",\"mobName\":\"頭目名\",\"mobGreeting\":\"頭目台詞\"}";
+                      + "。請只回傳純 JSON 物件：{\"chapterTitle\":\"標題\",\"biome\":\"forest或cyber或volcano或ruins\",\"openingNarration\":\"開場劇情(50字內)\",\"npcName\":\"新NPC名\",\"npcGreeting\":\"台詞\",\"choice1Label\":\"選項1\",\"choice1Item\":\"新道具\",\"choice1Reply\":\"回應1\",\"choice2Label\":\"選項2\",\"choice2Reply\":\"回應2\",\"chestName\":\"寶箱名\",\"chestItem\":\"寶物名\",\"mobName\":\"頭目名\",\"mobGreeting\":\"頭目台詞\"}";
 
                   URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent");
                   HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -396,6 +436,11 @@ jobs:
                   int nextNum = chapter + 1;
                   String[] biomes = {"forest", "cyber", "volcano", "ruins"};
                   String b = biomes[(nextNum - 2) % biomes.length];
+                  if (wish != null) {
+                      if (wish.contains("機械") || wish.contains("賽博")) b = "cyber";
+                      else if (wish.contains("龍") || wish.contains("火") || wish.contains("熔岩")) b = "volcano";
+                      else if (wish.contains("森") || wish.contains("林")) b = "forest";
+                  }
                   String lastItem = inventory.get(inventory.size() - 1);
                   String lastAct = history.get(history.size() - 1);
                   JSONObject obj = new JSONObject();
@@ -422,7 +467,7 @@ jobs:
                   chapter++;
                   chapterTitle = d.optString("chapterTitle", "第" + chapter + "章");
                   biome = d.optString("biome", "forest");
-                  px = 2; py = 3;
+                  px = 2; py = 3; renderPx = 2f; renderPy = 3f;
                   resetBorders();
                   grid[2][5] = 1; grid[4][5] = 2; grid[3][7] = 1;
                   entities.clear();
@@ -445,7 +490,7 @@ jobs:
                   Entity chest = new Entity();
                   chest.id = "chest_" + chapter; chest.type = "chest";
                   chest.name = d.optString("chestName", "星界寶箱"); chest.x = 6; chest.y = 5;
-                  chest.greeting = "閃耀著光芒的寶箱。";
+                  chest.greeting = "閃耀著金色符文光芒的古老寶箱。";
                   Choice cc = new Choice();
                   cc.label = "💎 開啟並吸收能量（共鳴+20，星幣+50）";
                   cc.mana = 20; cc.gold = 50; cc.item = d.optString("chestItem", "星界秘寶");
@@ -469,116 +514,357 @@ jobs:
                   portal.name = "時空裂隙"; portal.x = 10; portal.y = 3;
                   entities.add(portal);
 
+                  spawnFloat("✨ 第 " + chapter + " 章開啟！", px, py, Color.rgb(192, 132, 252));
                   addLog("🎬 【第" + chapter + "章：" + chapterTitle + "】" + d.optString("openingNarration", ""));
               }
 
+              // ==================== HD 2D 視覺渲染引擎 ====================
               class GameView extends View {
                   Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  Paint strokeP = new Paint(Paint.ANTI_ALIAS_FLAG);
                   RectF[] btnRects = new RectF[6];
-                  String[] btnLabels = {"◀ 左移", "▲ 上移", "▼ 下移", "▶ 右移", "💬 A 互動", "⚙️ Gemini 4 / 許願"};
+                  String[] btnLabels = {"◀ 左移", "▲ 上移", "▼ 下移", "▶ 右移", "💬 A 互動", "✨ Gemini 4 許願"};
+                  int pressedBtn = -1;
+                  long tick = 0;
 
-                  public GameView(Context ctx) { super(ctx); }
+                  public GameView(Context ctx) {
+                      super(ctx);
+                      strokeP.setStyle(Paint.Style.STROKE);
+                  }
 
                   @Override
                   protected void onDraw(Canvas canvas) {
                       super.onDraw(canvas);
-                      int w = getWidth(), h = getHeight();
-                      canvas.drawColor(Color.rgb(9, 13, 22));
+                      tick++;
+                      // 平滑角色移動差值動畫
+                      renderPx += (px - renderPx) * 0.32f;
+                      renderPy += (py - renderPy) * 0.32f;
 
-                      int topH = (int)(h * 0.11f);
-                      int botH = (int)(h * 0.16f);
-                      int midH = h - topH - botH - 16;
-                      int mapW = (int)(w * 0.62f);
+                      int w = getWidth(), h = getHeight();
+                      // 1. 深空漸層背景
+                      p.setShader(new LinearGradient(0, 0, 0, h,
+                          Color.rgb(8, 12, 24), Color.rgb(17, 24, 39), Shader.TileMode.CLAMP));
+                      canvas.drawRect(0, 0, w, h, p);
+                      p.setShader(null);
+
+                      int topH = (int)(h * 0.125f);
+                      int botH = (int)(h * 0.165f);
+                      int midH = h - topH - botH - 20;
+                      int mapW = (int)(w * 0.63f);
                       float tileW = (float) mapW / COLS;
                       float tileH = (float) midH / ROWS;
-                      float mapX = 12, mapY = topH + 8;
+                      float mapX = 14, mapY = topH + 10;
 
-                      p.setColor(Color.rgb(20, 30, 55));
-                      canvas.drawRoundRect(new RectF(12, 6, w - 12, topH), 14, 14, p);
+                      // 2. 頂部立體金屬質感 HUD 面板
+                      RectF hudRect = new RectF(14, 8, w - 14, topH);
+                      p.setShader(new LinearGradient(0, 8, 0, topH,
+                          Color.rgb(30, 41, 69), Color.rgb(15, 23, 42), Shader.TileMode.CLAMP));
+                      canvas.drawRoundRect(hudRect, 18, 18, p);
+                      p.setShader(null);
+                      strokeP.setStrokeWidth(2.5f);
+                      strokeP.setColor(Color.rgb(99, 102, 241));
+                      canvas.drawRoundRect(hudRect, 18, 18, strokeP);
+
+                      // 章節徽章
+                      RectF badgeRect = new RectF(26, 16, 26 + w * 0.28f, topH - 8);
+                      p.setShader(new LinearGradient(badgeRect.left, badgeRect.top, badgeRect.right, badgeRect.bottom,
+                          Color.rgb(79, 70, 229), Color.rgb(124, 58, 237), Shader.TileMode.CLAMP));
+                      canvas.drawRoundRect(badgeRect, 14, 14, p);
+                      p.setShader(null);
                       p.setColor(Color.WHITE);
-                      p.setTextSize(Math.max(22f, h * 0.032f));
-                      String hud = "【第" + chapter + "章：" + chapterTitle + "】 ❤️HP:" + hp + " ✨共鳴:" + mana + " 🪙:" + gold + " ⚖️:" + trait;
-                      canvas.drawText(hud, 28, topH * 0.68f, p);
+                      p.setTypeface(Typeface.DEFAULT_BOLD);
+                      p.setTextSize(Math.max(20f, h * 0.030f));
+                      canvas.drawText("第" + chapter + "章｜" + chapterTitle, badgeRect.left + 16, badgeRect.centerY() + h * 0.011f, p);
 
-                      int fl1 = Color.rgb(19, 28, 49), fl2 = Color.rgb(25, 36, 62), wallCol = Color.rgb(60, 75, 100);
-                      if ("forest".equals(biome)) { fl1 = Color.rgb(12, 38, 29); fl2 = Color.rgb(18, 50, 38); wallCol = Color.rgb(22, 101, 52); }
-                      else if ("cyber".equals(biome)) { fl1 = Color.rgb(18, 22, 52); fl2 = Color.rgb(30, 27, 78); wallCol = Color.rgb(67, 56, 202); }
-                      else if ("volcano".equals(biome)) { fl1 = Color.rgb(42, 18, 21); fl2 = Color.rgb(58, 24, 29); wallCol = Color.rgb(153, 27, 27); }
+                      // 視覺化 HP 血條與共鳴能量條
+                      float barStartX = badgeRect.right + 20;
+                      float barW = w * 0.16f;
+                      float barH = (topH - 24) * 0.52f;
+                      float barY = (topH + 8 - barH) / 2f;
+
+                      // HP Bar
+                      RectF hpBg = new RectF(barStartX, barY, barStartX + barW, barY + barH);
+                      p.setColor(Color.rgb(55, 20, 30));
+                      canvas.drawRoundRect(hpBg, 10, 10, p);
+                      float hpRatio = Math.max(0f, Math.min(1f, (float)hp / maxHp));
+                      RectF hpFg = new RectF(barStartX, barY, barStartX + barW * hpRatio, barY + barH);
+                      p.setShader(new LinearGradient(hpFg.left, hpFg.top, hpFg.right, hpFg.bottom,
+                          Color.rgb(244, 63, 94), Color.rgb(251, 113, 133), Shader.TileMode.CLAMP));
+                      canvas.drawRoundRect(hpFg, 10, 10, p);
+                      p.setShader(null);
+                      p.setColor(Color.WHITE);
+                      p.setTextSize(Math.max(16f, h * 0.024f));
+                      canvas.drawText("❤️ " + hp + "/" + maxHp, hpBg.left + 12, hpBg.centerY() + h * 0.009f, p);
+
+                      // Mana Bar
+                      float manaX = hpBg.right + 14;
+                      RectF mpBg = new RectF(manaX, barY, manaX + barW, barY + barH);
+                      p.setColor(Color.rgb(20, 30, 65));
+                      canvas.drawRoundRect(mpBg, 10, 10, p);
+                      float mpRatio = Math.max(0f, Math.min(1f, (float)mana / maxMana));
+                      RectF mpFg = new RectF(manaX, barY, manaX + barW * mpRatio, barY + barH);
+                      p.setShader(new LinearGradient(mpFg.left, mpFg.top, mpFg.right, mpFg.bottom,
+                          Color.rgb(56, 189, 248), Color.rgb(129, 140, 248), Shader.TileMode.CLAMP));
+                      canvas.drawRoundRect(mpFg, 10, 10, p);
+                      p.setShader(null);
+                      p.setColor(Color.WHITE);
+                      canvas.drawText("✨ 共鳴 " + mana, mpBg.left + 12, mpBg.centerY() + h * 0.009f, p);
+
+                      // 金幣與稱號
+                      float infoX = mpBg.right + 18;
+                      p.setColor(Color.rgb(251, 191, 36));
+                      canvas.drawText("🪙 " + gold + "   ⚖️ " + trait, infoX, hpBg.centerY() + h * 0.009f, p);
+
+                      // 3. 2D 網格地圖與環境主題配色
+                      int fl1 = Color.rgb(22, 32, 58), fl2 = Color.rgb(28, 41, 72);
+                      int wallTop = Color.rgb(71, 85, 105), wallSide = Color.rgb(40, 50, 70), runeCol = Color.rgb(129, 140, 248);
+                      if ("forest".equals(biome)) {
+                          fl1 = Color.rgb(14, 42, 32); fl2 = Color.rgb(20, 54, 42);
+                          wallTop = Color.rgb(22, 101, 52); wallSide = Color.rgb(14, 65, 34); runeCol = Color.rgb(52, 211, 153);
+                      } else if ("cyber".equals(biome)) {
+                          fl1 = Color.rgb(16, 20, 48); fl2 = Color.rgb(26, 30, 68);
+                          wallTop = Color.rgb(67, 56, 202); wallSide = Color.rgb(40, 35, 130); runeCol = Color.rgb(56, 189, 248);
+                      } else if ("volcano".equals(biome)) {
+                          fl1 = Color.rgb(45, 18, 22); fl2 = Color.rgb(60, 24, 30);
+                          wallTop = Color.rgb(153, 27, 27); wallSide = Color.rgb(95, 15, 15); runeCol = Color.rgb(251, 146, 60);
+                      }
+
+                      // 地圖外框陰影
+                      RectF mapFrame = new RectF(mapX - 2, mapY - 2, mapX + mapW + 2, mapY + midH + 2);
+                      strokeP.setColor(runeCol);
+                      strokeP.setStrokeWidth(2f);
+                      canvas.drawRoundRect(mapFrame, 12, 12, strokeP);
 
                       for (int r = 0; r < ROWS; r++) {
                           for (int c = 0; c < COLS; c++) {
                               float x = mapX + c * tileW, y = mapY + r * tileH;
-                              if (grid[r][c] == 1) p.setColor(wallCol);
-                              else if (grid[r][c] == 2) p.setColor(Color.rgb(107, 33, 168));
-                              else p.setColor((r + c) % 2 == 0 ? fl1 : fl2);
-                              canvas.drawRect(x, y, x + tileW - 1, y + tileH - 1, p);
+                              RectF tileRect = new RectF(x + 1, y + 1, x + tileW - 1, y + tileH - 1);
+                              if (grid[r][c] == 1) {
+                                  // 2.5D 立體牆磚／水晶柱
+                                  p.setColor(wallSide);
+                                  canvas.drawRoundRect(tileRect, 6, 6, p);
+                                  RectF topFace = new RectF(x + 2, y + 2, x + tileW - 2, y + tileH * 0.76f);
+                                  p.setColor(wallTop);
+                                  canvas.drawRoundRect(topFace, 6, 6, p);
+                                  p.setColor(runeCol);
+                                  p.setAlpha(90);
+                                  canvas.drawCircle(topFace.centerX(), topFace.centerY(), Math.min(tileW, tileH) * 0.10f, p);
+                                  p.setAlpha(255);
+                              } else if (grid[r][c] == 2) {
+                                  // 脈動能量沼澤／熔岩地塊
+                                  p.setColor(fl1);
+                                  canvas.drawRect(tileRect, p);
+                                  float pulse = (float)(0.35 + 0.15 * Math.sin(tick * 0.12 + c + r));
+                                  p.setShader(new RadialGradient(tileRect.centerX(), tileRect.centerY(),
+                                      Math.min(tileW, tileH) * 0.55f,
+                                      Color.argb((int)(pulse * 255), 192, 132, 252),
+                                      Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                                  canvas.drawOval(tileRect, p);
+                                  p.setShader(null);
+                              } else {
+                                  p.setColor((r + c) % 2 == 0 ? fl1 : fl2);
+                                  canvas.drawRoundRect(tileRect, 4, 4, p);
+                                  // 細緻地磚紋路點綴
+                                  if ((r * 3 + c * 5) % 7 == 0) {
+                                      p.setColor(runeCol);
+                                      p.setAlpha(40);
+                                      canvas.drawCircle(x + tileW * 0.25f, y + tileH * 0.25f, 2.5f, p);
+                                      p.setAlpha(255);
+                                  }
+                              }
                           }
                       }
 
-                      p.setTextSize(Math.max(18f, tileH * 0.26f));
+                      // 4. 漂浮環境星塵粒子
+                      for (Particle pt : particles) {
+                          pt.rx += pt.vx;
+                          pt.ry += pt.vy;
+                          if (pt.ry < 0f) { pt.ry = 1f; pt.rx = rnd.nextFloat(); }
+                          if (pt.rx < 0f) pt.rx = 1f;
+                          if (pt.rx > 1f) pt.rx = 0f;
+                          float pxPos = mapX + pt.rx * mapW;
+                          float pyPos = mapY + pt.ry * midH;
+                          p.setColor(runeCol);
+                          p.setAlpha((int)(pt.alpha * (120 + 80 * Math.sin(tick * 0.08 + pt.rx * 10))));
+                          canvas.drawCircle(pxPos, pyPos, pt.size, p);
+                      }
+                      p.setAlpha(255);
+
+                      // 5. 繪製精緻角色、寶箱、頭目與時空裂隙
+                      p.setTextSize(Math.max(17f, tileH * 0.24f));
                       for (Entity e : entities) {
                           float cx = mapX + (e.x + 0.5f) * tileW;
                           float cy = mapY + (e.y + 0.5f) * tileH;
-                          float rad = Math.min(tileW, tileH) * 0.34f;
+                          float rad = Math.min(tileW, tileH) * 0.36f;
+                          float bob = (float) Math.sin(tick * 0.12 + e.x * 2) * (tileH * 0.05f);
+
+                          // 底部陰影
+                          p.setColor(Color.argb(110, 0, 0, 0));
+                          canvas.drawOval(new RectF(cx - rad * 0.8f, cy + rad * 0.55f, cx + rad * 0.8f, cy + rad * 0.95f), p);
+
                           if ("portal".equals(e.type)) {
-                              p.setColor(Color.rgb(168, 85, 247));
-                              canvas.drawCircle(cx, cy, rad * 1.15f, p);
-                              p.setColor(Color.rgb(240, 171, 252));
-                              canvas.drawCircle(cx, cy, rad * 0.6f, p);
+                              // 多層次旋轉時空裂隙
+                              p.setShader(new RadialGradient(cx, cy, rad * 1.5f,
+                                  Color.argb(220, 232, 121, 249), Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                              canvas.drawCircle(cx, cy, rad * 1.5f, p);
+                              p.setShader(null);
+
+                              strokeP.setColor(Color.rgb(192, 132, 252));
+                              strokeP.setStrokeWidth(3.5f);
+                              canvas.drawCircle(cx, cy, rad * (0.95f + 0.1f * (float)Math.sin(tick * 0.15)), strokeP);
+                              p.setColor(Color.rgb(250, 232, 255));
+                              canvas.drawCircle(cx, cy, rad * 0.42f, p);
                           } else if ("chest".equals(e.type)) {
-                              p.setColor(Color.rgb(245, 158, 11));
-                              canvas.drawRect(cx - rad, cy - rad * 0.8f, cx + rad, cy + rad * 0.8f, p);
-                          } else if ("monster".equals(e.type)) {
-                              p.setColor(Color.rgb(244, 63, 94));
-                              canvas.drawCircle(cx, cy, rad, p);
-                          } else {
+                              // 黃金符文寶箱
+                              RectF box = new RectF(cx - rad * 0.85f, cy - rad * 0.55f + bob * 0.5f, cx + rad * 0.85f, cy + rad * 0.65f + bob * 0.5f);
+                              p.setColor(Color.rgb(120, 53, 15));
+                              canvas.drawRoundRect(box, 8, 8, p);
+                              strokeP.setColor(Color.rgb(251, 191, 36));
+                              strokeP.setStrokeWidth(3f);
+                              canvas.drawRoundRect(box, 8, 8, strokeP);
+                              p.setColor(Color.rgb(251, 191, 36));
+                              canvas.drawRect(box.left, box.centerY() - 3, box.right, box.centerY() + 3, p);
                               p.setColor(Color.rgb(56, 189, 248));
-                              canvas.drawCircle(cx, cy, rad, p);
+                              canvas.drawCircle(cx, box.centerY(), 5.5f, p);
+                          } else if ("monster".equals(e.type)) {
+                              // 領域頭目／裝甲哨兵（帶威脅紅光與雙角）
+                              p.setShader(new RadialGradient(cx, cy + bob, rad * 1.3f,
+                                  Color.argb(140, 244, 63, 94), Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                              canvas.drawCircle(cx, cy + bob, rad * 1.3f, p);
+                              p.setShader(null);
+
+                              p.setColor(Color.rgb(190, 18, 60));
+                              canvas.drawRoundRect(new RectF(cx - rad * 0.75f, cy - rad * 0.6f + bob, cx + rad * 0.75f, cy + rad * 0.7f + bob), 12, 12, p);
+                              // 頭目護目鏡與雙眼
+                              p.setColor(Color.rgb(254, 240, 138));
+                              canvas.drawCircle(cx - rad * 0.28f, cy - rad * 0.1f + bob, 4.5f, p);
+                              canvas.drawCircle(cx + rad * 0.28f, cy - rad * 0.1f + bob, 4.5f, p);
+                          } else {
+                              // NPC 賢者造型（斗篷＋頭部＋法杖光球）
+                              p.setColor(Color.rgb(14, 165, 233));
+                              canvas.drawRoundRect(new RectF(cx - rad * 0.65f, cy - rad * 0.1f + bob, cx + rad * 0.65f, cy + rad * 0.75f + bob), 10, 10, p);
+                              p.setColor(Color.rgb(254, 215, 170));
+                              canvas.drawCircle(cx, cy - rad * 0.42f + bob, rad * 0.44f, p);
+                              // 頭頂驚嘆號氣泡
+                              p.setColor(Color.rgb(251, 191, 36));
+                              canvas.drawCircle(cx + rad * 0.65f, cy - rad * 0.85f + bob, 9f, p);
                           }
-                          p.setColor(Color.WHITE);
+
+                          // 名稱膠囊標籤
                           float tw = p.measureText(e.name);
-                          canvas.drawText(e.name, cx - tw / 2, cy - rad - 6, p);
+                          RectF tagRect = new RectF(cx - tw / 2 - 10, cy - rad - tileH * 0.34f, cx + tw / 2 + 10, cy - rad - 4);
+                          p.setColor(Color.argb(185, 9, 13, 22));
+                          canvas.drawRoundRect(tagRect, 8, 8, p);
+                          p.setColor("portal".equals(e.type) ? Color.rgb(240, 171, 252) : Color.WHITE);
+                          canvas.drawText(e.name, cx - tw / 2, tagRect.bottom - 5, p);
                       }
 
-                      float pcx = mapX + (px + 0.5f) * tileW;
-                      float pcy = mapY + (py + 0.5f) * tileH;
-                      float prad = Math.min(tileW, tileH) * 0.36f;
-                      p.setColor(Color.rgb(99, 102, 241));
-                      canvas.drawCircle(pcx, pcy, prad * 1.15f, p);
-                      p.setColor(Color.rgb(253, 230, 138));
-                      canvas.drawCircle(pcx, pcy, prad * 0.75f, p);
+                      // 6. 繪製主角（勇者披風＋星盤光環＋隨身浮游星刃）
+                      float pcx = mapX + (renderPx + 0.5f) * tileW;
+                      float pcy = mapY + (renderPy + 0.5f) * tileH;
+                      float prad = Math.min(tileW, tileH) * 0.38f;
+                      float pbob = (float) Math.sin(tick * 0.18) * (tileH * 0.05f);
 
-                      float sideX = mapX + mapW + 12;
-                      float sideW = w - sideX - 12;
-                      p.setColor(Color.rgb(15, 23, 42));
-                      canvas.drawRoundRect(new RectF(sideX, mapY, sideX + sideW, mapY + midH), 14, 14, p);
+                      // 腳下星界光陣
+                      p.setShader(new RadialGradient(pcx, pcy + prad * 0.4f, prad * 1.45f,
+                          Color.argb(175, 99, 102, 241), Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                      canvas.drawCircle(pcx, pcy + prad * 0.4f, prad * 1.45f, p);
+                      p.setShader(null);
 
+                      // 披風與身軀
+                      p.setColor(Color.rgb(79, 70, 229));
+                      canvas.drawRoundRect(new RectF(pcx - prad * 0.72f, pcy - prad * 0.05f + pbob, pcx + prad * 0.72f, pcy + prad * 0.78f + pbob), 10, 10, p);
+                      // 頭部與頭冠
+                      p.setColor(Color.rgb(254, 240, 138));
+                      canvas.drawCircle(pcx, pcy - prad * 0.42f + pbob, prad * 0.48f, p);
+                      p.setColor(Color.rgb(245, 158, 11));
+                      canvas.drawRect(pcx - prad * 0.45f, pcy - prad * 0.82f + pbob, pcx + prad * 0.45f, pcy - prad * 0.62f + pbob, p);
+
+                      // 環繞主角旋轉的「古舊星盤」光球
+                      float orbX = pcx + (float)Math.cos(tick * 0.12) * (prad * 1.1f);
+                      float orbY = pcy + (float)Math.sin(tick * 0.12) * (prad * 0.7f);
                       p.setColor(Color.rgb(56, 189, 248));
-                      float textY = mapY + 32;
-                      float lineStep = Math.max(24f, h * 0.036f);
-                      p.setTextSize(Math.max(18f, h * 0.026f));
-                      drawWrapped(canvas, "🎒 背包：" + inventory.toString(), sideX + 14, textY, sideW - 28, lineStep);
-                      textY += lineStep * 1.8f;
+                      canvas.drawCircle(orbX, orbY, 5.5f, p);
 
-                      p.setColor(Color.rgb(226, 232, 240));
+                      // 7. 浮動戰鬥與獎勵文字動畫
+                      p.setTextSize(Math.max(18f, tileH * 0.28f));
+                      for (int i = floatTexts.size() - 1; i >= 0; i--) {
+                          FloatText ft = floatTexts.get(i);
+                          float fx = mapX + (ft.gx + 0.5f) * tileW;
+                          float fy = mapY + (ft.gy + 0.2f) * tileH + ft.offsetY;
+                          p.setColor(ft.color);
+                          p.setAlpha((int)(ft.alpha * 255));
+                          float ftw = p.measureText(ft.text);
+                          canvas.drawText(ft.text, fx - ftw / 2, fy, p);
+                          ft.offsetY -= 1.6f;
+                          ft.alpha -= 0.025f;
+                          if (ft.alpha <= 0f) floatTexts.remove(i);
+                      }
+                      p.setAlpha(255);
+
+                      // 8. 右側玻璃擬態劇情與裝備面板
+                      float sideX = mapX + mapW + 14;
+                      float sideW = w - sideX - 14;
+                      RectF sideRect = new RectF(sideX, mapY, sideX + sideW, mapY + midH);
+                      p.setShader(new LinearGradient(sideX, mapY, sideX, mapY + midH,
+                          Color.rgb(23, 33, 58), Color.rgb(13, 19, 36), Shader.TileMode.CLAMP));
+                      canvas.drawRoundRect(sideRect, 16, 16, p);
+                      p.setShader(null);
+                      strokeP.setColor(Color.rgb(79, 70, 229));
+                      strokeP.setStrokeWidth(2f);
+                      canvas.drawRoundRect(sideRect, 16, 16, strokeP);
+
+                      float textY = mapY + 30;
+                      float lineStep = Math.max(22f, h * 0.034f);
+                      p.setTextSize(Math.max(17f, h * 0.025f));
+                      p.setColor(Color.rgb(251, 191, 36));
+                      textY = drawWrapped(canvas, "🎒 持有信物：" + inventory.toString(), sideX + 14, textY, sideW - 28, lineStep);
+
+                      // 分隔線
+                      p.setColor(Color.rgb(51, 65, 85));
+                      canvas.drawLine(sideX + 12, textY + 4, sideX + sideW - 12, textY + 4, p);
+                      textY += 16;
+
                       for (int i = Math.max(0, logs.size() - 5); i < logs.size(); i++) {
-                          textY = drawWrapped(canvas, logs.get(i), sideX + 14, textY, sideW - 28, lineStep) + 8;
-                          if (textY > mapY + midH - 20) break;
+                          String entry = logs.get(i);
+                          if (entry.startsWith("🎬") || entry.startsWith("🌟")) p.setColor(Color.rgb(192, 132, 252));
+                          else if (entry.startsWith("👉") || entry.startsWith("⚡")) p.setColor(Color.rgb(52, 211, 153));
+                          else p.setColor(Color.rgb(226, 232, 240));
+                          textY = drawWrapped(canvas, entry, sideX + 14, textY, sideW - 28, lineStep) + 6;
+                          if (textY > mapY + midH - 18) break;
                       }
 
-                      float btnY = mapY + midH + 8;
-                      float btnW = (w - 24 - 5 * 10) / 6f;
+                      // 9. 底部立體發光觸控搖桿與指令按鈕列
+                      float btnY = mapY + midH + 10;
+                      float btnW = (w - 28 - 5 * 10) / 6f;
+                      p.setTextSize(Math.max(18f, h * 0.027f));
                       for (int i = 0; i < 6; i++) {
-                          float bx = 12 + i * (btnW + 10);
-                          btnRects[i] = new RectF(bx, btnY, bx + btnW, h - 8);
-                          if (i == 4) p.setColor(Color.rgb(79, 70, 229));
-                          else if (i == 5) p.setColor(Color.rgb(217, 119, 6));
-                          else p.setColor(Color.rgb(30, 41, 59));
-                          canvas.drawRoundRect(btnRects[i], 14, 14, p);
+                          float bx = 14 + i * (btnW + 10);
+                          float byTop = (pressedBtn == i) ? btnY + 4 : btnY;
+                          btnRects[i] = new RectF(bx, byTop, bx + btnW, h - 8);
+
+                          int cTop, cBot, borderCol;
+                          if (i == 4) {
+                              cTop = Color.rgb(99, 102, 241); cBot = Color.rgb(67, 56, 202); borderCol = Color.rgb(165, 180, 252);
+                          } else if (i == 5) {
+                              cTop = Color.rgb(245, 158, 11); cBot = Color.rgb(180, 83, 9); borderCol = Color.rgb(253, 230, 138);
+                          } else {
+                              cTop = Color.rgb(45, 58, 82); cBot = Color.rgb(25, 35, 55); borderCol = Color.rgb(100, 116, 139);
+                          }
+                          p.setShader(new LinearGradient(0, byTop, 0, h - 8, cTop, cBot, Shader.TileMode.CLAMP));
+                          canvas.drawRoundRect(btnRects[i], 16, 16, p);
+                          p.setShader(null);
+                          strokeP.setColor(borderCol);
+                          strokeP.setStrokeWidth(2f);
+                          canvas.drawRoundRect(btnRects[i], 16, 16, strokeP);
+
                           p.setColor(Color.WHITE);
                           float bw = p.measureText(btnLabels[i]);
-                          canvas.drawText(btnLabels[i], bx + (btnW - bw) / 2, btnY + (h - 8 - btnY) * 0.62f, p);
+                          canvas.drawText(btnLabels[i], bx + (btnW - bw) / 2, byTop + (h - 8 - byTop) * 0.62f, p);
                       }
+
+                      // 持續 30FPS 動畫重繪
+                      postInvalidateDelayed(33);
                   }
 
                   float drawWrapped(Canvas c, String text, float x, float y, float maxW, float lineH) {
@@ -602,10 +888,16 @@ jobs:
 
                   @Override
                   public boolean onTouchEvent(MotionEvent ev) {
-                      if (ev.getAction() != MotionEvent.ACTION_DOWN) return true;
                       float tx = ev.getX(), ty = ev.getY();
+                      if (ev.getAction() == MotionEvent.ACTION_UP || ev.getAction() == MotionEvent.ACTION_CANCEL) {
+                          pressedBtn = -1;
+                          return true;
+                      }
+                      if (ev.getAction() != MotionEvent.ACTION_DOWN) return true;
+
                       for (int i = 0; i < 6; i++) {
                           if (btnRects[i] != null && btnRects[i].contains(tx, ty)) {
+                              pressedBtn = i;
                               if (i == 0) movePlayer(-1, 0);
                               else if (i == 1) movePlayer(0, -1);
                               else if (i == 2) movePlayer(0, 1);
@@ -616,11 +908,11 @@ jobs:
                           }
                       }
                       int w = getWidth(), h = getHeight();
-                      int topH = (int)(h * 0.11f), botH = (int)(h * 0.16f);
-                      int midH = h - topH - botH - 16, mapW = (int)(w * 0.62f);
-                      if (tx >= 12 && tx <= 12 + mapW && ty >= topH + 8 && ty <= topH + 8 + midH) {
-                          int gx = (int)((tx - 12) / ((float)mapW / COLS));
-                          int gy = (int)((ty - topH - 8) / ((float)midH / ROWS));
+                      int topH = (int)(h * 0.125f), botH = (int)(h * 0.165f);
+                      int midH = h - topH - botH - 20, mapW = (int)(w * 0.63f);
+                      if (tx >= 14 && tx <= 14 + mapW && ty >= topH + 10 && ty <= topH + 10 + midH) {
+                          int gx = (int)((tx - 14) / ((float)mapW / COLS));
+                          int gy = (int)((ty - topH - 10) / ((float)midH / ROWS));
                           int dx = gx - px, dy = gy - py;
                           if (dx == 0 && dy == 0) interactNearby();
                           else if (Math.abs(dx) >= Math.abs(dy)) movePlayer(dx > 0 ? 1 : -1, 0);
@@ -656,10 +948,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add gemini4-2d-rpg.apk
-          git diff --staged --quiet || git commit -m "Auto-publish gemini4-2d-rpg.apk to repository root [skip ci]"
+          git diff --staged --quiet || git commit -m "Auto-publish HD upgraded gemini4-2d-rpg.apk [skip ci]"
           git push
 
           gh release delete v1.0.0 --yes --cleanup-tag || true
           gh release create v1.0.0 bin/gemini4-2d-rpg.apk \
-            --title "星界迴響 2D APK (自動發佈版)" \
+            --title "星界迴響 2D APK (HD 視覺升級版)" \
             --notes "直接點擊下方 Assets 裡的 gemini4-2d-rpg.apk 即可下載到手機安裝（免解壓縮）！"

@@ -5,31 +5,619 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-env:
-  PYTHONFORANDROID_PREREQUISITES_INSTALL_INTERACTIVE: 0
-
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Install Linux Build Dependencies
+      - name: Build Native Android 2D RPG APK
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip autoconf libtool pkg-config \
-            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
-            cmake libffi-dev libssl-dev automake libltdl-
+          set -e
+          mkdir -p src/org/aether/rpg res/values obj bin
+
+          cat << 'EOF' > res/values/strings.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">星界迴響 2D</string>
+          </resources>
+          EOF
+
+          cat << 'EOF' > AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="org.aether.rpg"
+              android:versionCode="1"
+              android:versionName="1.0">
+              <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="33" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > src/org/aether/rpg/MainActivity.java
+          package org.aether.rpg;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Context;
+          import android.content.DialogInterface;
+          import android.content.SharedPreferences;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.Paint;
+          import android.graphics.RectF;
+          import android.os.Bundle;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.Toast;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.util.ArrayList;
+
+          public class MainActivity extends Activity {
+              static class Choice {
+                  String label, trait, item, log, reply;
+                  int hp, mana, gold;
+              }
+              static class Entity {
+                  String id, type, name, greeting;
+                  int x, y;
+                  ArrayList<Choice> choices = new ArrayList<Choice>();
+              }
+
+              int chapter = 1, hp = 100, mana = 30, gold = 50;
+              String chapterTitle = "遺落星門的甦醒", biome = "ruins", trait = "中立探索者";
+              ArrayList<String> inventory = new ArrayList<String>();
+              ArrayList<String> history = new ArrayList<String>();
+              ArrayList<String> logs = new ArrayList<String>();
+              ArrayList<Entity> entities = new ArrayList<Entity>();
+
+              final int COLS = 12, ROWS = 7;
+              int[][] grid = new int[ROWS][COLS];
+              int px = 2, py = 3;
+              boolean isGenerating = false;
+              String apiKey = "";
+              GameView gameView;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  SharedPreferences sp = getSharedPreferences("gemini4_rpg", Context.MODE_PRIVATE);
+                  apiKey = sp.getString("api_key", "");
+                  inventory.add("古舊星盤");
+                  history.add("第1章開始：帶著古舊星盤在星門遺跡甦醒。");
+                  addLog("🌟 歡迎來到《星界迴響》Android 原生 2D 版！");
+                  addLog("👉 點擊 2D 地圖格子或下方方向鍵移動；走進右側紫圈即可讓 Gemini 4 根據你的遊玩過程生成新章節！");
+                  initChapter1();
+                  gameView = new GameView(this);
+                  setContentView(gameView);
+              }
+
+              void addLog(String s) {
+                  logs.add(s);
+                  if (logs.size() > 8) logs.remove(0);
+              }
+
+              void resetBorders() {
+                  for (int r = 0; r < ROWS; r++) {
+                      for (int c = 0; c < COLS; c++) {
+                          grid[r][c] = (r == 0 || r == ROWS - 1 || c == 0 || c == COLS - 1) ? 1 : 0;
+                      }
+                  }
+              }
+
+              void initChapter1() {
+                  resetBorders();
+                  grid[2][4] = 1; grid[4][4] = 1; grid[3][7] = 2; grid[4][7] = 2;
+                  entities.clear();
+
+                  Entity npc = new Entity();
+                  npc.id = "npc1"; npc.type = "npc"; npc.name = "守門人艾琳"; npc.x = 3; npc.y = 3;
+                  npc.greeting = "「旅人，你的古舊星盤正在共鳴！啟動星門會抽乾村莊結界，你打算怎麼做？」";
+                  Choice c1 = new Choice();
+                  c1.label = "🛡️ 保護村莊：分出星盤能量（共鳴-10，獲「守護紋章」）";
+                  c1.mana = -10; c1.trait = "仁慈守護者"; c1.item = "守護紋章";
+                  c1.log = "選擇保護村莊結界，獲得守護紋章。"; c1.reply = "艾琳感激地行禮：「這枚紋章會在下個世界保護你！」";
+                  Choice c2 = new Choice();
+                  c2.label = "⚡ 強行超載星門：抽取結界能量（共鳴+25，獲「超載核心」）";
+                  c2.mana = 25; c2.trait = "狂熱求知者"; c2.item = "超載核心";
+                  c2.log = "強行超載星門取得超載核心。"; c2.reply = "星門發出轟鳴！艾琳驚呼：「小心裂隙裡的獵犬！」";
+                  npc.choices.add(c1); npc.choices.add(c2);
+                  entities.add(npc);
+
+                  Entity chest = new Entity();
+                  chest.id = "chest1"; chest.type = "chest"; chest.name = "星塵寶箱"; chest.x = 6; chest.y = 2;
+                  chest.greeting = "你在遺跡間發現一座刻滿符文的星塵寶箱。";
+                  Choice cc = new Choice();
+                  cc.label = "🔓 用星盤共鳴解鎖（星幣+45，獲「記憶水晶」）";
+                  cc.gold = 45; cc.item = "記憶水晶"; cc.log = "開啟星塵寶箱取得記憶水晶。";
+                  cc.reply = "寶箱彈開，獲得記錄上古秘辛的「記憶水晶」！";
+                  chest.choices.add(cc);
+                  entities.add(chest);
+
+                  Entity mob = new Entity();
+                  mob.id = "mob1"; mob.type = "monster"; mob.name = "失控哨兵"; mob.x = 8; mob.y = 5;
+                  mob.greeting = "失控的星界哨兵擋在前方：「警告—發現未授權生命體—」";
+                  Choice mc1 = new Choice();
+                  mc1.label = "⚔️ 正面揮劍擊破（HP-15，星幣+50，獲「哨兵核心」）";
+                  mc1.hp = -15; mc1.gold = 50; mc1.item = "哨兵核心"; mc1.trait = "無畏戰士";
+                  mc1.log = "正面擊破星界哨兵奪得哨兵核心。"; mc1.reply = "你精準斬斷哨兵動力線，奪取了核心！";
+                  Choice mc2 = new Choice();
+                  mc2.label = "🔧 用星盤改寫程式收服（共鳴-15，獲「機械夥伴」）";
+                  mc2.mana = -15; mc2.item = "機械夥伴"; mc2.trait = "機械親和者";
+                  mc2.log = "改寫哨兵程式並收服為機械夥伴。"; mc2.reply = "哨兵紅光轉為藍光：「邏輯重設完成，聽候差遣。」";
+                  mob.choices.add(mc1); mob.choices.add(mc2);
+                  entities.add(mob);
+
+                  Entity portal = new Entity();
+                  portal.id = "portal"; portal.type = "portal"; portal.name = "時空裂隙"; portal.x = 10; portal.y = 3;
+                  entities.add(portal);
+              }
+
+              void movePlayer(int dx, int dy) {
+                  if (isGenerating) return;
+                  int nx = px + dx, ny = py + dy;
+                  if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS || grid[ny][nx] == 1) return;
+                  for (Entity e : entities) {
+                      if (e.x == nx && e.y == ny) {
+                          interactEntity(e);
+                          gameView.invalidate();
+                          return;
+                      }
+                  }
+                  px = nx; py = ny;
+                  if (grid[ny][nx] == 2) {
+                      hp = Math.max(1, hp - 2);
+                      addLog("⚠️ 踏入能量地形，HP -2");
+                  }
+                  gameView.invalidate();
+              }
+
+              void interactNearby() {
+                  for (Entity e : entities) {
+                      if (Math.abs(e.x - px) + Math.abs(e.y - py) <= 1) {
+                          interactEntity(e);
+                          return;
+                      }
+                  }
+                  Toast.makeText(this, "請先靠近地圖上的角色、寶箱或紫色裂隙", Toast.LENGTH_SHORT).show();
+              }
+
+              void interactEntity(final Entity e) {
+                  if ("portal".equals(e.type)) {
+                      generateNextChapter("");
+                      return;
+                  }
+                  AlertDialog.Builder b = new AlertDialog.Builder(this);
+                  b.setTitle("💬 " + e.name + "：" + e.greeting);
+                  String[] items = new String[e.choices.size() + 1];
+                  for (int i = 0; i < e.choices.size(); i++) items[i] = e.choices.get(i).label;
+                  items[e.choices.size()] = "✨ 輸入自訂自由行動...";
+                  b.setItems(items, new DialogInterface.OnClickListener() {
+                      @Override
+                      public void onClick(DialogInterface d, int which) {
+                          if (which < e.choices.size()) {
+                              applyChoice(e, e.choices.get(which));
+                          } else {
+                              promptCustomAction(e);
+                          }
+                      }
+                  });
+                  b.setNegativeButton("關閉", null);
+                  b.show();
+              }
+
+              void applyChoice(Entity e, Choice c) {
+                  hp = Math.max(1, Math.min(200, hp + c.hp));
+                  mana = Math.max(0, mana + c.mana);
+                  gold = Math.max(0, gold + c.gold);
+                  if (c.trait != null && !c.trait.isEmpty()) trait = c.trait;
+                  if (c.item != null && !c.item.isEmpty() && !inventory.contains(c.item)) inventory.add(c.item);
+                  history.add("第" + chapter + "章：" + c.log);
+                  addLog("👉 " + c.log);
+                  if (c.reply != null && !c.reply.isEmpty()) addLog("💬 " + c.reply);
+                  if ("chest".equals(e.type) || "monster".equals(e.type)) entities.remove(e);
+                  gameView.invalidate();
+              }
+
+              void promptCustomAction(final Entity e) {
+                  final EditText et = new EditText(this);
+                  et.setHint("輸入你對 " + e.name + " 採取的行動或話語...");
+                  new AlertDialog.Builder(this)
+                      .setTitle("⚡ 自由行動")
+                      .setView(et)
+                      .setPositiveButton("執行", new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int w) {
+                              String act = et.getText().toString().trim();
+                              if (!act.isEmpty()) {
+                                  mana += 10;
+                                  trait = "自由破局者";
+                                  String log = "對「" + e.name + "」執行自由行動：「" + act + "」";
+                                  history.add("第" + chapter + "章：" + log);
+                                  addLog("⚡ " + log + "（已記入下一章劇情種子！）");
+                                  gameView.invalidate();
+                              }
+                          }
+                      })
+                      .setNegativeButton("取消", null)
+                      .show();
+              }
+
+              void openApiKeyDialog() {
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  final EditText keyEt = new EditText(this);
+                  keyEt.setHint("貼上 Google AI Studio 的 Gemini API Key (選填)");
+                  keyEt.setText(apiKey);
+                  final EditText wishEt = new EditText(this);
+                  wishEt.setHint("或輸入下一章劇情許願（如：出現巨龍、機械迷宮）");
+                  layout.addView(keyEt);
+                  layout.addView(wishEt);
+
+                  new AlertDialog.Builder(this)
+                      .setTitle("⚙️ Gemini 4 引擎設定與劇情許願")
+                      .setView(layout)
+                      .setPositiveButton("儲存並生成下一章", new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int w) {
+                              apiKey = keyEt.getText().toString().trim();
+                              getSharedPreferences("gemini4_rpg", Context.MODE_PRIVATE)
+                                  .edit().putString("api_key", apiKey).apply();
+                              String wish = wishEt.getText().toString().trim();
+                              generateNextChapter(wish);
+                          }
+                      })
+                      .setNeutralButton("僅儲存金鑰", new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int w) {
+                              apiKey = keyEt.getText().toString().trim();
+                              getSharedPreferences("gemini4_rpg", Context.MODE_PRIVATE)
+                                  .edit().putString("api_key", apiKey).apply();
+                              Toast.makeText(MainActivity.this, "已儲存 API Key！", Toast.LENGTH_SHORT).show();
+                          }
+                      })
+                      .setNegativeButton("取消", null)
+                      .show();
+              }
+
+              void generateNextChapter(final String wish) {
+                  if (isGenerating) return;
+                  isGenerating = true;
+                  addLog("⏳ 正在根據你的遊玩歷程生成第 " + (chapter + 1) + " 章...");
+                  gameView.invalidate();
+
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          JSONObject result = null;
+                          if (apiKey != null && !apiKey.isEmpty()) {
+                              try {
+                                  result = callGemini4Api(wish);
+                              } catch (Exception ex) {
+                                  final String msg = ex.getMessage();
+                                  runOnUiThread(new Runnable() {
+                                      @Override
+                                      public void run() {
+                                          addLog("⚠️ API 連線提示 (" + msg + ")，已使用內建動態引擎生成！");
+                                      }
+                                  });
+                              }
+                          }
+                          final JSONObject finalData = (result != null) ? result : buildFallbackChapter(wish);
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  applyNewChapter(finalData);
+                                  isGenerating = false;
+                                  gameView.invalidate();
+                              }
+                          });
+                      }
+                  }).start();
+              }
+
+              JSONObject callGemini4Api(String wish) throws Exception {
+                  int nextNum = chapter + 1;
+                  String prompt = "你是 2D 遊戲《星界迴響》的動態劇本引擎。請根據玩家的遊玩過程生成第 " + nextNum + " 章 JSON。"
+                      + "玩家目前傾向：" + trait + "，背包：" + inventory.toString()
+                      + "，過往紀錄：" + history.toString()
+                      + "，額外願望：" + (wish.isEmpty() ? "依過往選擇延續" : wish)
+                      + "。請只回傳純 JSON 物件：{\"chapterTitle\":\"標題\",\"biome\":\"forest或cyber或volcano\",\"openingNarration\":\"開場劇情(50字內)\",\"npcName\":\"新NPC名\",\"npcGreeting\":\"台詞\",\"choice1Label\":\"選項1\",\"choice1Item\":\"新道具\",\"choice1Reply\":\"回應1\",\"choice2Label\":\"選項2\",\"choice2Reply\":\"回應2\",\"chestName\":\"寶箱名\",\"chestItem\":\"寶物名\",\"mobName\":\"頭目名\",\"mobGreeting\":\"頭目台詞\"}";
+
+                  URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent");
+                  HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                  conn.setConnectTimeout(15000);
+                  conn.setReadTimeout(20000);
+                  conn.setRequestMethod("POST");
+                  conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                  conn.setRequestProperty("x-goog-api-key", apiKey);
+                  conn.setDoOutput(true);
+
+                  JSONObject reqBody = new JSONObject();
+                  JSONArray contents = new JSONArray();
+                  JSONObject partObj = new JSONObject().put("text", prompt);
+                  contents.put(new JSONObject().put("parts", new JSONArray().put(partObj)));
+                  reqBody.put("contents", contents);
+                  reqBody.put("generationConfig", new JSONObject().put("responseMimeType", "application/json"));
+
+                  OutputStream os = conn.getOutputStream();
+                  os.write(reqBody.toString().getBytes("UTF-8"));
+                  os.close();
+
+                  BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+                  StringBuilder sb = new StringBuilder();
+                  String line;
+                  while ((line = br.readLine()) != null) sb.append(line);
+                  br.close();
+
+                  JSONObject respJson = new JSONObject(sb.toString());
+                  String raw = respJson.getJSONArray("candidates").getJSONObject(0)
+                      .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text");
+                  raw = raw.replace("```json", "").replace("```", "").trim();
+                  return new JSONObject(raw);
+              }
+
+              JSONObject buildFallbackChapter(String wish) {
+                  int nextNum = chapter + 1;
+                  String[] biomes = {"forest", "cyber", "volcano", "ruins"};
+                  String b = biomes[(nextNum - 2) % biomes.length];
+                  String lastItem = inventory.get(inventory.size() - 1);
+                  String lastAct = history.get(history.size() - 1);
+                  JSONObject obj = new JSONObject();
+                  try {
+                      obj.put("chapterTitle", (wish != null && !wish.isEmpty()) ? "迴響：" + wish : "第" + nextNum + "紀元：星界因果");
+                      obj.put("biome", b);
+                      obj.put("openingNarration", "因你在上一章「" + lastAct + "」，星界裂隙將你帶到了新領域！");
+                      obj.put("npcName", "星界引路人洛伊");
+                      obj.put("npcGreeting", "「帶著『" + lastItem + "』的" + trait + "，這裡有專屬於你的新試煉！」");
+                      obj.put("choice1Label", "🌟 出示「" + lastItem + "」進行共鳴強化（共鳴+20）");
+                      obj.put("choice1Item", "第" + nextNum + "章星印");
+                      obj.put("choice1Reply", "「這正是預言中的信物，收下這枚星印吧！」");
+                      obj.put("choice2Label", "💚 請求恢復生命與補給（HP+25，星幣+40）");
+                      obj.put("choice2Reply", "「傷勢已為你治癒，去挑戰前方的領域頭目吧！」");
+                      obj.put("chestName", "共鳴祭壇寶箱");
+                      obj.put("chestItem", "純淨星核·" + nextNum);
+                      obj.put("mobName", (wish != null && !wish.isEmpty()) ? wish + "化身領主" : "第" + nextNum + "章守衛領主");
+                      obj.put("mobGreeting", "「證明你身為『" + trait + "』的真正實力吧！」");
+                  } catch (Exception ignored) {}
+                  return obj;
+              }
+
+              void applyNewChapter(JSONObject d) {
+                  chapter++;
+                  chapterTitle = d.optString("chapterTitle", "第" + chapter + "章");
+                  biome = d.optString("biome", "forest");
+                  px = 2; py = 3;
+                  resetBorders();
+                  grid[2][5] = 1; grid[4][5] = 2; grid[3][7] = 1;
+                  entities.clear();
+
+                  Entity npc = new Entity();
+                  npc.id = "npc_" + chapter; npc.type = "npc";
+                  npc.name = d.optString("npcName", "神祕先知"); npc.x = 4; npc.y = 2;
+                  npc.greeting = d.optString("npcGreeting", "「命運再次轉動了。」");
+                  Choice c1 = new Choice();
+                  c1.label = d.optString("choice1Label", "進行共鳴互動");
+                  c1.mana = 20; c1.item = d.optString("choice1Item", "星界符印"); c1.trait = "星界破譯者";
+                  c1.log = "與 " + npc.name + " 完成共鳴互動。"; c1.reply = d.optString("choice1Reply", "獲得新的力量！");
+                  Choice c2 = new Choice();
+                  c2.label = d.optString("choice2Label", "請求支援與情報");
+                  c2.hp = 25; c2.gold = 40; c2.trait = "沉穩旅人";
+                  c2.log = "向 " + npc.name + " 取得支援。"; c2.reply = d.optString("choice2Reply", "祝你旅途順利！");
+                  npc.choices.add(c1); npc.choices.add(c2);
+                  entities.add(npc);
+
+                  Entity chest = new Entity();
+                  chest.id = "chest_" + chapter; chest.type = "chest";
+                  chest.name = d.optString("chestName", "星界寶箱"); chest.x = 6; chest.y = 5;
+                  chest.greeting = "閃耀著光芒的寶箱。";
+                  Choice cc = new Choice();
+                  cc.label = "💎 開啟並吸收能量（共鳴+20，星幣+50）";
+                  cc.mana = 20; cc.gold = 50; cc.item = d.optString("chestItem", "星界秘寶");
+                  cc.log = "開啟了 " + chest.name + "。"; cc.reply = "獲得了珍貴的秘寶！";
+                  chest.choices.add(cc);
+                  entities.add(chest);
+
+                  Entity mob = new Entity();
+                  mob.id = "mob_" + chapter; mob.type = "monster";
+                  mob.name = d.optString("mobName", "領域領主"); mob.x = 8; mob.y = 3;
+                  mob.greeting = d.optString("mobGreeting", "「接受試煉吧！」");
+                  Choice mc = new Choice();
+                  mc.label = "🔥 發動星界奧義擊敗領主（HP-15，星幣+80）";
+                  mc.hp = -15; mc.gold = 80; mc.item = "領主之證·" + chapter; mc.trait = "傳奇征服者";
+                  mc.log = "擊敗了 " + mob.name + "。"; mc.reply = "領主化為星塵，通往下一章的裂隙已敞開！";
+                  mob.choices.add(mc);
+                  entities.add(mob);
+
+                  Entity portal = new Entity();
+                  portal.id = "portal_" + chapter; portal.type = "portal";
+                  portal.name = "時空裂隙"; portal.x = 10; portal.y = 3;
+                  entities.add(portal);
+
+                  addLog("🎬 【第" + chapter + "章：" + chapterTitle + "】" + d.optString("openingNarration", ""));
+              }
+
+              class GameView extends View {
+                  Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  RectF[] btnRects = new RectF[6];
+                  String[] btnLabels = {"◀ 左移", "▲ 上移", "▼ 下移", "▶ 右移", "💬 A 互動", "⚙️ Gemini 4 / 許願"};
+
+                  public GameView(Context ctx) { super(ctx); }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      super.onDraw(canvas);
+                      int w = getWidth(), h = getHeight();
+                      canvas.drawColor(Color.rgb(9, 13, 22));
+
+                      int topH = (int)(h * 0.11f);
+                      int botH = (int)(h * 0.16f);
+                      int midH = h - topH - botH - 16;
+                      int mapW = (int)(w * 0.62f);
+                      float tileW = (float) mapW / COLS;
+                      float tileH = (float) midH / ROWS;
+                      float mapX = 12, mapY = topH + 8;
+
+                      // 1. 頂部 HUD
+                      p.setColor(Color.rgb(20, 30, 55));
+                      canvas.drawRoundRect(new RectF(12, 6, w - 12, topH), 14, 14, p);
+                      p.setColor(Color.WHITE);
+                      p.setTextSize(Math.max(22f, h * 0.032f));
+                      String hud = "【第" + chapter + "章：" + chapterTitle + "】 ❤️HP:" + hp + " ✨共鳴:" + mana + " 🪙:" + gold + " ⚖️:" + trait;
+                      canvas.drawText(hud, 28, topH * 0.68f, p);
+
+                      // 2. 2D 網格地圖
+                      int fl1 = Color.rgb(19, 28, 49), fl2 = Color.rgb(25, 36, 62), wallCol = Color.rgb(60, 75, 100);
+                      if ("forest".equals(biome)) { fl1 = Color.rgb(12, 38, 29); fl2 = Color.rgb(18, 50, 38); wallCol = Color.rgb(22, 101, 52); }
+                      else if ("cyber".equals(biome)) { fl1 = Color.rgb(18, 22, 52); fl2 = Color.rgb(30, 27, 78); wallCol = Color.rgb(67, 56, 202); }
+                      else if ("volcano".equals(biome)) { fl1 = Color.rgb(42, 18, 21); fl2 = Color.rgb(58, 24, 29); wallCol = Color.rgb(153, 27, 27); }
+
+                      for (int r = 0; r < ROWS; r++) {
+                          for (int c = 0; c < COLS; c++) {
+                              float x = mapX + c * tileW, y = mapY + r * tileH;
+                              if (grid[r][c] == 1) p.setColor(wallCol);
+                              else if (grid[r][c] == 2) p.setColor(Color.rgb(107, 33, 168));
+                              else p.setColor((r + c) % 2 == 0 ? fl1 : fl2);
+                              canvas.drawRect(x, y, x + tileW - 1, y + tileH - 1, p);
+                          }
+                      }
+
+                      // 3. 繪製 NPC、寶箱、頭目與時空裂隙
+                      p.setTextSize(Math.max(18f, tileH * 0.26f));
+                      for (Entity e : entities) {
+                          float cx = mapX + (e.x + 0.5f) * tileW;
+                          float cy = mapY + (e.y + 0.5f) * tileH;
+                          float rad = Math.min(tileW, tileH) * 0.34f;
+                          if ("portal".equals(e.type)) {
+                              p.setColor(Color.rgb(168, 85, 247));
+                              canvas.drawCircle(cx, cy, rad * 1.15f, p);
+                              p.setColor(Color.rgb(240, 171, 252));
+                              canvas.drawCircle(cx, cy, rad * 0.6f, p);
+                          } else if ("chest".equals(e.type)) {
+                              p.setColor(Color.rgb(245, 158, 11));
+                              canvas.drawRect(cx - rad, cy - rad * 0.8f, cx + rad, cy + rad * 0.8f, p);
+                          } else if ("monster".equals(e.type)) {
+                              p.setColor(Color.rgb(244, 63, 94));
+                              canvas.drawCircle(cx, cy, rad, p);
+                          } else {
+                              p.setColor(Color.rgb(56, 189, 248));
+                              canvas.drawCircle(cx, cy, rad, p);
+                          }
+                          p.setColor(Color.WHITE);
+                          float tw = p.measureText(e.name);
+                          canvas.drawText(e.name, cx - tw / 2, cy - rad - 6, p);
+                      }
+
+                      // 4. 繪製主角
+                      float pcx = mapX + (px + 0.5f) * tileW;
+                      float pcy = mapY + (py + 0.5f) * tileH;
+                      float prad = Math.min(tileW, tileH) * 0.36f;
+                      p.setColor(Color.rgb(99, 102, 241));
+                      canvas.drawCircle(pcx, pcy, prad * 1.15f, p);
+                      p.setColor(Color.rgb(253, 230, 138));
+                      canvas.drawCircle(pcx, pcy, prad * 0.75f, p);
+
+                      // 5. 右側劇情與背包欄
+                      float sideX = mapX + mapW + 12;
+                      float sideW = w - sideX - 12;
+                      p.setColor(Color.rgb(15, 23, 42));
+                      canvas.drawRoundRect(new RectF(sideX, mapY, sideX + sideW, mapY + midH), 14, 14, p);
+
+                      p.setColor(Color.rgb(56, 189, 248));
+                      float textY = mapY + 32;
+                      float lineStep = Math.max(24f, h * 0.036f);
+                      p.setTextSize(Math.max(18f, h * 0.026f));
+                      drawWrapped(canvas, "🎒 背包：" + inventory.toString(), sideX + 14, textY, sideW - 28, lineStep);
+                      textY += lineStep * 1.8f;
+
+                      p.setColor(Color.rgb(226, 232, 240));
+                      for (int i = Math.max(0, logs.size() - 5); i < logs.size(); i++) {
+                          textY = drawWrapped(canvas, logs.get(i), sideX + 14, textY, sideW - 28, lineStep) + 8;
+                          if (textY > mapY + midH - 20) break;
+                      }
+
+                      // 6. 底部觸控按鈕列
+                      float btnY = mapY + midH + 8;
+                      float btnW = (w - 24 - 5 * 10) / 6f;
+                      for (int i = 0; i < 6; i++) {
+                          float bx = 12 + i * (btnW + 10);
+                          btnRects[i] = new RectF(bx, btnY, bx + btnW, h - 8);
+                          if (i == 4) p.setColor(Color.rgb(79, 70, 229));
+                          else if (i == 5) p.setColor(Color.rgb(217, 119, 6));
+                          else p.setColor(Color.rgb(30, 41, 59));
+                          canvas.drawRoundRect(btnRects[i], 14, 14, p);
+                          p.setColor(Color.WHITE);
+                          float bw = p.measureText(btnLabels[i]);
+                          canvas.drawText(btnLabels[i], bx + (btnW - bw) / 2, btnY + (h - 8 - btnY) * 0.62f, p);
+                      }
+                  }
+
+                  float drawWrapped(Canvas c, String text, float x, float y, float maxW, float lineH) {
+                      String line = "";
+                      for (int i = 0; i < text.length(); i++) {
+                          char ch = text.charAt(i);
+                          if (p.measureText(line + ch) <= maxW) {
+                              line += ch;
+                          } else {
+                              c.drawText(line, x, y, p);
+                              y += lineH;
+                              line = String.valueOf(ch);
+                          }
+                      }
+                      if (!line.isEmpty()) {
+                          c.drawText(line, x, y, p);
+                          y += lineH;
+                      }
+                      return y;
+                  }
+
+                  @Override
+                  public boolean onTouchEvent(MotionEvent ev) {
+                      if (ev.getAction() != MotionEvent.ACTION_DOWN) return true;
+                      float tx = ev.getX(), ty = ev.getY();
+                      for (int i = 0; i < 6; i++) {
+                          if (btnRects[i] != null && btnRects[i].contains(tx, ty)) {
+                              if (i == 0) movePlayer(-1, 0);
+                              else if (i == 1) movePlayer(0, -1);
+                              else if (i == 2) movePlayer(0, 1);
+                              else if (i == 3) movePlayer(1, 0);
+                              else if (i == 4) interactNearby();
+                              else if (i == 5) openApiKeyDialog();
+                              return true;
+                          }
+                      }
+                      int w = getWidth(), h = getHeight();
+                      int topH = (int)(h * 0.11f), botH = (int)(h * 0.16f);
+                      int midH = h - topH - botH - 16, mapW = (int)(w * 0.62f);
+                      if (tx >= 12 && tx <= 12 + mapW && ty >= topH + 8 && ty <= topH + 8 + midH) {
+                          int gx = (int)((tx - 12) / ((float)mapW / COLS));
+                          int gy = (int)((ty - topH - 8) / ((float)midH / ROWS));
+                          int dx = gx - px, dy = gy - py;
+                          if (dx == 0 && dy == 0) interactNearby();
+                          else if (Math.abs(dx) >= Math.abs(dy)) movePlayer(

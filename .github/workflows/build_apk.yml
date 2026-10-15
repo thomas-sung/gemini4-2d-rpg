@@ -1,0 +1,2156 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - '**.apk'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: 1. 檢出專案檔案 (Checkout)
+        uses: actions/checkout@v4
+
+      - name: 2. 設定 Java 17 編譯環境
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 3. 產生 Android 設定檔並編譯簽署 APK
+        run: |
+          set -e
+          rm -rf build_tmp
+          mkdir -p build_tmp/src/org/aether/rpg build_tmp/res/values build_tmp/obj bin
+
+          JAVA_SRC=$(find . -maxdepth 2 -iname "mainactivity*.java" | head -n 1)
+          if [ -n "$JAVA_SRC" ] && grep -q "targetWalkX" "$JAVA_SRC"; then
+            echo "使用專案內的最新版 v5 $JAVA_SRC"
+            python3 -c '
+          import sys, pathlib
+          txt = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          parts = txt.split("package org.aether.rpg;")
+          if len(parts) > 2:
+              txt = "package org.aether.rpg;" + parts[1]
+          pathlib.Path("build_tmp/src/org/aether/rpg/MainActivity.java").write_text(txt, encoding="utf-8")
+          ' "$JAVA_SRC"
+          else
+            echo "自動升級專案內的 MainActivity.java 為 v5 完整版..."
+            cat << 'EOF_JAVA' > build_tmp/src/org/aether/rpg/MainActivity.java
+          package org.aether.rpg;
+          
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Context;
+          import android.content.DialogInterface;
+          import android.content.SharedPreferences;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.LinearGradient;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.RadialGradient;
+          import android.graphics.RectF;
+          import android.graphics.Shader;
+          import android.graphics.Typeface;
+          import android.os.Bundle;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.Toast;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.DatagramPacket;
+          import java.net.DatagramSocket;
+          import java.net.HttpURLConnection;
+          import java.net.Inet4Address;
+          import java.net.InetAddress;
+          import java.net.InetSocketAddress;
+          import java.net.NetworkInterface;
+          import java.net.URL;
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Date;
+          import java.util.Enumeration;
+          import java.util.HashSet;
+          import java.util.Locale;
+          import java.util.Random;
+          
+          public class MainActivity extends Activity {
+              static class Choice {
+                  String label, trait, item, log, reply;
+                  String addFlag, removeFlag, requireFlag, forbidFlag;
+                  int hp, mana, gold, exp;
+              }
+              static class Entity {
+                  String id, type, name, greeting, roleStyle;
+                  int x, y, homeX, homeY, patrolRange = 0;
+                  float renderX, renderY;
+                  boolean triggered = false;
+                  boolean stunned = false; // 被玩家的星輝斬或星盤脈衝先手擊暈/破甲
+                  ArrayList<Choice> choices = new ArrayList<Choice>();
+                  Entity(String id, String type, String name, int x, int y) {
+                      this.id = id; this.type = type; this.name = name;
+                      this.x = x; this.y = y; this.homeX = x; this.homeY = y;
+                      this.renderX = x; this.renderY = y;
+                  }
+              }
+              static class FloatText {
+                  String text;
+                  float gx, gy, offsetY, alpha;
+                  int color;
+                  FloatText(String t, float x, float y, int c) {
+                      text = t; gx = x; gy = y; offsetY = 0f; alpha = 1f; color = c;
+                  }
+              }
+              static class Particle {
+                  float rx, ry, vx, vy, size, alpha;
+                  Particle(Random rnd) {
+                      rx = rnd.nextFloat();
+                      ry = rnd.nextFloat();
+                      vx = (rnd.nextFloat() - 0.5f) * 0.0015f;
+                      vy = -0.0007f - rnd.nextFloat() * 0.0012f;
+                      size = 2.0f + rnd.nextFloat() * 4.0f;
+                      alpha = 0.35f + rnd.nextFloat() * 0.65f;
+                  }
+              }
+              static class RemotePeer {
+                  String name = "星界盟友";
+                  String ip = "";
+                  int x = 4, y = 7, zone = 1, hp = 100, level = 1;
+                  float renderX = 4f, renderY = 7f;
+                  String chatBubble = "";
+                  long bubbleTime = 0;
+                  long lastSeen = 0;
+              }
+          
+              boolean inTitleScreen = true;
+          
+              // 24x14 大世界網格：0=地板, 1=石牆, 2=能量陷阱, 3=古道石板, 4=星光靈草(可採集回血), 5=裂縫密室牆(可用脈衝震碎)
+              final int WORLD_COLS = 24, WORLD_ROWS = 14;
+              final float VIEW_COLS = 10.5f, VIEW_ROWS = 6.2f;
+              int[][] grid = new int[WORLD_ROWS][WORLD_COLS];
+          
+              // 完整 RPG 成長與裝備數值
+              int zoneIndex = 1, level = 1, exp = 0, nextExp = 100;
+              int hp = 120, maxHp = 120, mana = 50, maxMana = 100, gold = 80;
+              int atk = 15, def = 5;
+              String playerName = "星輝劍士";
+              String myChatBubble = "";
+              long myBubbleTime = 0;
+              String zoneTitle = "A區：遺落星門聖殿", biome = "ruins", trait = "星界旅人";
+              boolean isRoadMap = false;
+          
+              HashSet<String> worldFlags = new HashSet<String>();
+              ArrayList<String> inventory = new ArrayList<String>();
+              ArrayList<String> history = new ArrayList<String>();
+              ArrayList<String> logs = new ArrayList<String>();
+              ArrayList<Entity> entities = new ArrayList<Entity>();
+              ArrayList<FloatText> floatTexts = new ArrayList<FloatText>();
+              ArrayList<Particle> particles = new ArrayList<Particle>();
+          
+              // 玩家座標、自動尋路目標與按住連發移動
+              int px = 3, py = 7;
+              int targetWalkX = -1, targetWalkY = -1; // 點擊地圖遠處時自動一步步走過去
+              float renderPx = 3f, renderPy = 7f;
+              float camX = 0f, camY = 0f;
+              int facingX = 1, facingY = 0;
+              float walkCycle = 0f;
+              float shockwaveRadius = 0f;
+              float swordSlashAngle = 0f; // 揮劍斬擊弧光動畫
+          
+              // 區網連線 (UDP Port 19876)
+              final int LAN_PORT = 19876;
+              boolean lanEnabled = false;
+              String targetPeerIp = "255.255.255.255";
+              String myLocalIp = "偵測中...";
+              DatagramSocket udpSocket = null;
+              RemotePeer ally = new RemotePeer();
+          
+              boolean isGenerating = false;
+              String apiKey = "";
+              String activeModelUsed = "內建因果引擎";
+              GameView gameView;
+              Random rnd = new Random();
+          
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  SharedPreferences sp = getSharedPreferences("gemini4_rpg_v5", Context.MODE_PRIVATE);
+                  apiKey = sp.getString("api_key", "");
+                  playerName = sp.getString("player_name", "星輝劍士" + (10 + rnd.nextInt(89)));
+                  for (int i = 0; i < 38; i++) particles.add(new Particle(rnd));
+                  myLocalIp = detectLocalIp();
+                  resetNewGameData();
+                  gameView = new GameView(this);
+                  setContentView(gameView);
+              }
+          
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  lanEnabled = false;
+                  if (udpSocket != null) {
+                      try { udpSocket.close(); } catch (Exception ignored) {}
+                  }
+              }
+          
+              void resetNewGameData() {
+                  zoneIndex = 1; level = 1; exp = 0; nextExp = 100;
+                  hp = 120; maxHp = 120; mana = 50; maxMana = 100; gold = 80;
+                  atk = 15; def = 5;
+                  zoneTitle = "A區：遺落星門聖殿"; biome = "ruins"; trait = "星界旅人";
+                  isRoadMap = false;
+                  targetWalkX = -1; targetWalkY = -1;
+                  worldFlags.clear();
+                  inventory.clear();
+                  history.clear();
+                  logs.clear();
+                  inventory.add("古舊星盤");
+                  history.add("在 A區「遺落星門聖殿」甦醒。");
+                  addLog("🌟 歡迎來到《星界迴響》v5 自測疊代完整版！");
+                  addLog("🎮 新功能：1.點擊遠處地圖可自動尋路走過去、按住方向鍵可連續行走！ 2.底部可放「🗡️斬擊/⚡脈衝」先手破甲強敵或震碎裂縫牆(棕色格)！ 3.採集翠綠「🌿星光靈草」可直接回血回魔！");
+                  initZone1();
+              }
+          
+              void addLog(String s) {
+                  logs.add(s);
+                  if (logs.size() > 8) logs.remove(0);
+              }
+          
+              void spawnFloat(String text, float x, float y, int color) {
+                  floatTexts.add(new FloatText(text, x, y, color));
+              }
+          
+              // 獲得經驗值與自動升等檢核
+              void gainExp(int amount) {
+                  if (amount <= 0) return;
+                  exp += amount;
+                  while (exp >= nextExp) {
+                      exp -= nextExp;
+                      level++;
+                      nextExp = 100 + (level - 1) * 50;
+                      maxHp += 25;
+                      maxMana += 15;
+                      hp = maxHp;
+                      mana = maxMana;
+                      atk += 6;
+                      def += 3;
+                      shockwaveRadius = 0.2f;
+                      spawnFloat("🎉 升至 Lv." + level + " (全狀態回滿！)", px, py - 0.5f, Color.rgb(251, 191, 36));
+                      addLog("🎉 【等級提升】你升到了 Lv." + level + "！生命上限+25、攻擊力+6、防禦+3，且體力與共鳴完全恢復！");
+                  }
+              }
+          
+              // 根據背包持有的神器動態計算裝備攻擊與防禦加成
+              void recalcEquipmentStats() {
+                  int bonusAtk = 0, bonusDef = 0;
+                  if (inventory.contains("斬鐵星刃") || inventory.contains("深淵魔晶")) bonusAtk += 18;
+                  if (inventory.contains("獵犬星牙") || inventory.contains("哨兵殘骸核心")) bonusAtk += 8;
+                  if (inventory.contains("守護紋章") || inventory.contains("高階裝甲片")) bonusDef += 10;
+                  if (inventory.contains("雙星共鳴徽章")) { bonusAtk += 12; bonusDef += 8; }
+                  atk = 15 + (level - 1) * 6 + bonusAtk;
+                  def = 5 + (level - 1) * 3 + bonusDef;
+              }
+          
+              boolean checkChoiceAllowed(Choice c) {
+                  if (c.requireFlag != null && !c.requireFlag.isEmpty() && !worldFlags.contains(c.requireFlag)) return false;
+                  if (c.forbidFlag != null && !c.forbidFlag.isEmpty() && worldFlags.contains(c.forbidFlag)) return false;
+                  return true;
+              }
+          
+              boolean isAllyOnline() {
+                  return lanEnabled && (System.currentTimeMillis() - ally.lastSeen < 6000);
+              }
+          
+              // ==================== 存檔與讀檔系統 (3 槽位 + 等級與世界狀態保存) ====================
+              void saveGameToSlot(int slot) {
+                  try {
+                      JSONObject obj = new JSONObject();
+                      obj.put("zoneIndex", zoneIndex);
+                      obj.put("zoneTitle", zoneTitle);
+                      obj.put("biome", biome);
+                      obj.put("level", level);
+                      obj.put("exp", exp);
+                      obj.put("nextExp", nextExp);
+                      obj.put("hp", hp);
+                      obj.put("maxHp", maxHp);
+                      obj.put("mana", mana);
+                      obj.put("maxMana", maxMana);
+                      obj.put("gold", gold);
+                      obj.put("trait", trait);
+                      obj.put("px", px);
+                      obj.put("py", py);
+                      obj.put("inventory", new JSONArray(inventory));
+                      obj.put("history", new JSONArray(history));
+                      obj.put("flags", new JSONArray(worldFlags));
+                      String timeStr = new SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(new Date());
+                      String summary = "Lv." + level + " " + zoneTitle + " | HP:" + hp + " 🪙:" + gold + " (" + timeStr + ")";
+                      obj.put("summary", summary);
+          
+                      SharedPreferences sp = getSharedPreferences("gemini4_rpg_v5", Context.MODE_PRIVATE);
+                      sp.edit()
+                          .putString("save_slot_" + slot, obj.toString())
+                          .putString("save_summary_" + slot, summary)
+                          .apply();
+                      spawnFloat("💾 已存檔至槽位 " + slot, px, py, Color.rgb(52, 211, 153));
+                      Toast.makeText(this, "✅ 成功儲存至【存檔槽 " + slot + "】！", Toast.LENGTH_SHORT).show();
+                  } catch (Exception e) {
+                      Toast.makeText(this, "存檔失敗：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+                  }
+              }
+          
+              void loadGameFromSlot(int slot) {
+                  SharedPreferences sp = getSharedPreferences("gemini4_rpg_v5", Context.MODE_PRIVATE);
+                  String raw = sp.getString("save_slot_" + slot, "");
+                  if (raw == null || raw.isEmpty()) {
+                      Toast.makeText(this, "⚠️ 存檔槽 " + slot + " 目前是空的！", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  try {
+                      JSONObject obj = new JSONObject(raw);
+                      zoneIndex = obj.optInt("zoneIndex", 1);
+                      zoneTitle = obj.optString("zoneTitle", "A區：遺落星門聖殿");
+                      biome = obj.optString("biome", "ruins");
+                      level = obj.optInt("level", 1);
+                      exp = obj.optInt("exp", 0);
+                      nextExp = obj.optInt("nextExp", 100);
+                      hp = obj.optInt("hp", 120);
+                      maxHp = obj.optInt("maxHp", 120);
+                      mana = obj.optInt("mana", 50);
+                      maxMana = obj.optInt("maxMana", 100);
+                      gold = obj.optInt("gold", 80);
+                      trait = obj.optString("trait", "星界旅人");
+          
+                      inventory.clear();
+                      JSONArray invArr = obj.optJSONArray("inventory");
+                      if (invArr != null) for (int i = 0; i < invArr.length(); i++) inventory.add(invArr.getString(i));
+          
+                      history.clear();
+                      JSONArray hisArr = obj.optJSONArray("history");
+                      if (hisArr != null) for (int i = 0; i < hisArr.length(); i++) history.add(hisArr.getString(i));
+          
+                      worldFlags.clear();
+                      JSONArray flgArr = obj.optJSONArray("flags");
+                      if (flgArr != null) for (int i = 0; i < flgArr.length(); i++) worldFlags.add(flgArr.getString(i));
+          
+                      recalcEquipmentStats();
+                      if (zoneIndex == 1) {
+                          initZone1();
+                      } else {
+                          JSONObject zData = buildCausalLocalZone("TELEPORT");
+                          zoneIndex--;
+                          applyNewZone(zData, "TELEPORT");
+                      }
+                      px = obj.optInt("px", 3);
+                      py = obj.optInt("py", 7);
+                      renderPx = px; renderPy = py;
+                      targetWalkX = -1; targetWalkY = -1;
+                      inTitleScreen = false;
+                      addLog("📂 已成功讀取【存檔槽 " + slot + "】進度：" + zoneTitle);
+                      spawnFloat("📂 讀檔成功！", px, py, Color.rgb(56, 189, 248));
+                  } catch (Exception e) {
+                      Toast.makeText(this, "讀檔失敗：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+                  }
+              }
+          
+              String getSlotSummary(int slot) {
+                  SharedPreferences sp = getSharedPreferences("gemini4_rpg_v5", Context.MODE_PRIVATE);
+                  return sp.getString("save_summary_" + slot, "（空存檔槽）");
+              }
+          
+              void openSaveLoadDialog(final boolean isSaveMode) {
+                  String[] items = new String[]{
+                      "槽位 1：" + getSlotSummary(1),
+                      "槽位 2：" + getSlotSummary(2),
+                      "槽位 3：" + getSlotSummary(3)
+                  };
+                  new AlertDialog.Builder(this)
+                      .setTitle(isSaveMode ? "💾 選擇要寫入的存檔槽" : "📂 選擇要讀取的進度槽")
+                      .setItems(items, new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int which) {
+                              int slot = which + 1;
+                              if (isSaveMode) saveGameToSlot(slot);
+                              else loadGameFromSlot(slot);
+                          }
+                      })
+                      .setNegativeButton("取消", null)
+                      .show();
+              }
+          
+              // ==================== 區網 Wi-Fi / 熱點即時連線與快捷喊話系統 ====================
+              String detectLocalIp() {
+                  try {
+                      Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces();
+                      while (en.hasMoreElements()) {
+                          NetworkInterface intf = en.nextElement();
+                          Enumeration<InetAddress> enumIpAddr = intf.getInetAddresses();
+                          while (enumIpAddr.hasMoreElements()) {
+                              InetAddress inetAddress = enumIpAddr.nextElement();
+                              if (!inetAddress.isLoopbackAddress() && inetAddress instanceof Inet4Address) {
+                                  return inetAddress.getHostAddress();
+                              }
+                          }
+                      }
+                  } catch (Exception ignored) {}
+                  return "127.0.0.1";
+              }
+          
+              void startLanMultiplayer() {
+                  if (lanEnabled) return;
+                  lanEnabled = true;
+                  myLocalIp = detectLocalIp();
+                  addLog("📡 區網連線已啟動！本機 IP：" + myLocalIp + "（同 Wi-Fi 或熱點下可自動發現盟友並同屏共遊）");
+          
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              udpSocket = new DatagramSocket(null);
+                              udpSocket.setReuseAddress(true);
+                              udpSocket.setBroadcast(true);
+                              udpSocket.bind(new InetSocketAddress(LAN_PORT));
+                              byte[] buf = new byte[1024];
+                              while (lanEnabled) {
+                                  DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+                                  udpSocket.receive(pkt);
+                                  String senderIp = pkt.getAddress().getHostAddress();
+                                  if (senderIp.equals(myLocalIp)) continue;
+                                  String s = new String(pkt.getData(), 0, pkt.getLength(), "UTF-8");
+                                  JSONObject j = new JSONObject(s);
+                                  if (j.optString("senderId", "").equals(playerName)) continue;
+          
+                                  ally.name = j.optString("senderId", "星界盟友");
+                                  ally.ip = senderIp;
+                                  ally.x = j.optInt("x", 4);
+                                  ally.y = j.optInt("y", 7);
+                                  ally.zone = j.optInt("zone", 1);
+                                  ally.hp = j.optInt("hp", 100);
+                                  ally.level = j.optInt("level", 1);
+                                  ally.lastSeen = System.currentTimeMillis();
+          
+                                  final String chat = j.optString("chat", "");
+                                  if (!chat.isEmpty()) {
+                                      ally.chatBubble = chat;
+                                      ally.bubbleTime = System.currentTimeMillis();
+                                  }
+                                  final String gift = j.optString("gift", "");
+                                  if (!gift.isEmpty()) {
+                                      runOnUiThread(new Runnable() {
+                                          @Override
+                                          public void run() {
+                                              hp = Math.min(maxHp, hp + 30);
+                                              mana = Math.min(maxMana, mana + 20);
+                                              spawnFloat("🤝 盟友支援 +30HP!", px, py, Color.rgb(52, 211, 153));
+                                              addLog("🌟 收到區網盟友【" + ally.name + "】傳來的星界祝福（HP+30，共鳴+20）！");
+                                          }
+                                      });
+                                  }
+                              }
+                          } catch (Exception ignored) {}
+                      }
+                  }).start();
+          
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          while (lanEnabled) {
+                              broadcastPacket("", "");
+                              try { Thread.sleep(220); } catch (Exception ignored) {}
+                          }
+                      }
+                  }).start();
+              }
+          
+              void broadcastPacket(final String giftMsg, final String chatMsg) {
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              if (udpSocket == null || udpSocket.isClosed()) return;
+                              JSONObject j = new JSONObject();
+                              j.put("senderId", playerName);
+                              j.put("x", px);
+                              j.put("y", py);
+                              j.put("zone", zoneIndex);
+                              j.put("hp", hp);
+                              j.put("level", level);
+                              if (giftMsg != null && !giftMsg.isEmpty()) j.put("gift", giftMsg);
+                              if (chatMsg != null && !chatMsg.isEmpty()) j.put("chat", chatMsg);
+                              byte[] data = j.toString().getBytes("UTF-8");
+          
+                              DatagramPacket p1 = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), LAN_PORT);
+                              udpSocket.send(p1);
+                              if (!"255.255.255.255".equals(targetPeerIp) && !targetPeerIp.isEmpty()) {
+                                  DatagramPacket p2 = new DatagramPacket(data, data.length, InetAddress.getByName(targetPeerIp), LAN_PORT);
+                                  udpSocket.send(p2);
+                              }
+                          } catch (Exception ignored) {}
+                      }
+                  }).start();
+              }
+          
+              void openLanDialog() {
+                  myLocalIp = detectLocalIp();
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(36, 16, 36, 8);
+          
+                  final EditText nameEt = new EditText(this);
+                  nameEt.setHint("你的角色暱稱");
+                  nameEt.setText(playerName);
+          
+                  final EditText ipEt = new EditText(this);
+                  ipEt.setHint("對方手機 IP（預設 255.255.255.255 自動搜尋）");
+                  ipEt.setText(targetPeerIp);
+          
+                  final EditText chatEt = new EditText(this);
+                  chatEt.setHint("輸入頭頂喊話氣泡（如：一起走東邊古道！）");
+          
+                  layout.addView(nameEt);
+                  layout.addView(ipEt);
+                  layout.addView(chatEt);
+          
+                  String status = isAllyOnline()
+                      ? "✅ 已連線盟友：【Lv." + ally.level + " " + ally.name + "】(" + ally.ip + ")"
+                      : (lanEnabled ? "📡 區網搜尋中... 請確認兩支手機連上同一個 Wi-Fi 或熱點" : "⚪ 區網連線尚未開啟");
+          
+                  new AlertDialog.Builder(this)
+                      .setTitle("📡 區網雙人共遊 ＆ 即時喊話")
+                      .setMessage("本機 IP：" + myLocalIp + "\n" + status)
+                      .setView(layout)
+                      .setPositiveButton(lanEnabled ? "💬 發送喊話 ＆ 祝福盟友" : "🚀 啟動區網連線", new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int w) {
+                              playerName = nameEt.getText().toString().trim();
+                              if (playerName.isEmpty()) playerName = "星輝劍士";
+                              targetPeerIp = ipEt.getText().toString().trim();
+                              if (targetPeerIp.isEmpty()) targetPeerIp = "255.255.255.255";
+                              String chatText = chatEt.getText().toString().trim();
+                              getSharedPreferences("gemini4_rpg_v5", Context.MODE_PRIVATE)
+                                  .edit().putString("player_name", playerName).apply();
+          
+                              if (!lanEnabled) {
+                                  startLanMultiplayer();
+                                  inTitleScreen = false;
+                              } else {
+                                  if (!chatText.isEmpty()) {
+                                      myChatBubble = chatText;
+                                      myBubbleTime = System.currentTimeMillis();
+                                  }
+                                  broadcastPacket("BLESS", chatText);
+                                  spawnFloat("📡 已傳送祝福與訊息！", px, py, Color.rgb(56, 189, 248));
+                              }
+                          }
+                      })
+                      .setNegativeButton("關閉", null)
+                      .show();
+              }
+          
+              // ==================== 雙戰鬥技：🗡️ 星輝斬擊 ＆ ⚡ 星盤脈衝 ====================
+              void performActionOrSkill() {
+                  if (inTitleScreen || isGenerating) return;
+                  // 先釋放近戰「星輝斬擊」劍氣（免費無消耗，可擊暈 1~2 格內巡邏怪與砍草），若有 10 共鳴同時觸發星盤脈衝波！
+                  swordSlashAngle = 1.0f;
+                  boolean usedPulse = false;
+                  if (mana >= 10) {
+                      mana -= 10;
+                      shockwaveRadius = 0.25f;
+                      usedPulse = true;
+                  }
+          
+                  boolean hitAny = false;
+                  // 檢查周圍 2 格內的裂縫密室牆 (grid==5) 或靈草 (grid==4)
+                  for (int r = Math.max(1, py - 2); r <= Math.min(WORLD_ROWS - 2, py + 2); r++) {
+                      for (int c = Math.max(1, px - 2); c <= Math.min(WORLD_COLS - 2, px + 2); c++) {
+                          if (Math.abs(c - px) + Math.abs(r - py) <= 2) {
+                              if (grid[r][c] == 5) {
+                                  grid[r][c] = 0;
+                                  gold += 45;
+                                  gainExp(25);
+                                  spawnFloat("💥 震碎密室牆 +45🪙!", c, r, Color.rgb(251, 191, 36));
+                                  addLog("⚡ 你震碎了隱藏的裂縫石牆，發現牆後藏著的 45 星幣與星界秘寶！");
+                                  hitAny = true;
+                              } else if (grid[r][c] == 4) {
+                                  grid[r][c] = 0;
+                                  hp = Math.min(maxHp, hp + 20);
+                                  mana = Math.min(maxMana, mana + 15);
+                                  spawnFloat("🌿 採集靈草 +20HP", c, r, Color.rgb(52, 211, 153));
+                                  hitAny = true;
+                              }
+                          }
+                      }
+                  }
+          
+                  // 檢查周圍 2 格內的怪物與寶箱
+                  for (int i = entities.size() - 1; i >= 0; i--) {
+                      Entity e = entities.get(i);
+                      int dist = Math.abs(e.x - px) + Math.abs(e.y - py);
+                      if (dist <= 2) {
+                          if ("chest".equals(e.type) && usedPulse) {
+                              gold += 55;
+                              if (!inventory.contains("星界傳送符")) inventory.add("星界傳送符");
+                              worldFlags.add("HAS_TELEPORT_RUNE");
+                              gainExp(30);
+                              spawnFloat("🔓 脈衝開箱 +55🪙!", e.x, e.y, Color.rgb(251, 191, 36));
+                              addLog("⚡ 星盤脈衝隔空震開了「" + e.name + "」，取得「星界傳送符」與 55 星幣！");
+                              entities.remove(i);
+                              hitAny = true;
+                          } else if ("monster".equals(e.type)) {
+                              if (!e.stunned) {
+                                  e.stunned = true;
+                                  e.patrolRange = 0; // 被擊暈定身！
+                                  gainExp(20);
+                                  spawnFloat("🗡️ 破甲擊暈！(敵方弱化)", e.x, e.y, Color.rgb(56, 189, 248));
+                                  addLog("🗡️ 你的星輝斬擊精準命中「" + e.name + "」的弱點！敵方已陷入【💫破甲暈眩】狀態，現在上前互動可無傷壓制！");
+                              } else {
+                                  gold += 50;
+                                  gainExp(45);
+                                  spawnFloat("⚔️ 斬滅強敵 +50🪙!", e.x, e.y, Color.rgb(251, 191, 36));
+                                  addLog("⚔️ 你乘勝追擊徹底擊潰了陷入暈眩的「" + e.name + "」，獲得 50 星幣與 45 EXP！");
+                                  entities.remove(i);
+                              }
+                              hitAny = true;
+                          }
+                      }
+                  }
+                  if (!hitAny) {
+                      spawnFloat(usedPulse ? "🗡️ 星輝斬 + ⚡脈衝" : "🗡️ 星輝斬擊！", px, py, Color.rgb(56, 189, 248));
+                  }
+              }
+          
+              // ==================== 建立 A 區：豐富的 24x14 大地圖 ====================
+              void initZone1() {
+                  isRoadMap = false;
+                  targetWalkX = -1; targetWalkY = -1;
+                  for (int r = 0; r < WORLD_ROWS; r++) {
+                      for (int c = 0; c < WORLD_COLS; c++) {
+                          if (r == 0 || r == WORLD_ROWS - 1 || c == 0 || c == WORLD_COLS - 1) grid[r][c] = 1;
+                          else if (r == 7 && c >= 2 && c <= 22) grid[r][c] = 3;
+                          else if (c == 14 && r >= 2 && r <= 7) grid[r][c] = 3;
+                          else grid[r][c] = 0;
+                      }
+                  }
+                  int[][] walls = {
+                      {6,2},{6,3},{6,4},{6,9},{6,10},{6,11},
+                      {11,2},{11,3},{11,10},{11,11},
+                      {17,4},{17,5},{17,9},{17,10}
+                  };
+                  for (int[] w : walls) grid[w[1]][w[0]] = 1;
+                  // 裂縫密室牆 (5) 與 星光靈草 (4) 與 能量池 (2)
+                  grid[3][6] = 5; grid[10][11] = 5;
+                  grid[2][4] = 4; grid[11][4] = 4; grid[5][13] = 4; grid[11][18] = 4;
+                  int[][] pools = {{8,4},{9,4},{8,10},{9,10},{18,3},{19,3}};
+                  for (int[] p : pools) grid[p[1]][p[0]] = 2;
+          
+                  px = 3; py = 7; renderPx = 3f; renderPy = 7f;
+                  entities.clear();
+          
+                  // 1. 守門人艾琳
+                  Entity elaine = new Entity("npc_elaine", "npc", "守門人艾琳", 5, 6);
+                  elaine.roleStyle = "mage";
+                  elaine.greeting = "「旅人，東邊古道通往未知的邊境，北邊則有古代傳送陣。但目前星門結界不穩，你要如何處置手上的古舊星盤？」";
+          
+                  Choice ec1 = new Choice();
+                  ec1.label = "🛡️ 注入能量加固村莊結界（共鳴-10，獲「守護紋章」減傷護盾 +40 EXP）";
+                  ec1.mana = -10; ec1.exp = 40; ec1.trait = "仁慈守護者"; ec1.item = "守護紋章";
+                  ec1.addFlag = "PROTECTED_VILLAGE"; ec1.removeFlag = "OVERLOADED_GATE";
+                  ec1.log = "加固村莊結界，與守門人結盟並獲得守護紋章。";
+                  ec1.reply = "艾琳感激地行禮：「巡守隊已經收到訊號，你在後續區域將獲得我們的庇護！」";
+          
+                  Choice ec2 = new Choice();
+                  ec2.label = "⚡ 強行抽取結界能量充能（共鳴+35，獲「超載核心」+40 EXP，但引來星界追獵者）";
+                  ec2.mana = 35; ec2.exp = 40; ec2.trait = "狂熱求知者"; ec2.item = "超載核心";
+                  ec2.addFlag = "OVERLOADED_GATE"; ec2.removeFlag = "PROTECTED_VILLAGE";
+                  ec2.log = "強行抽乾村莊結界取得超載核心，引發星界警報。";
+                  ec2.reply = "結界碎裂！艾琳臉色蒼白：「你雖然拿到龐大共鳴，但古道上的異獸與追獵者已經鎖定你了！」";
+          
+                  elaine.choices.add(ec1); elaine.choices.add(ec2);
+                  entities.add(elaine);
+          
+                  // 2. 遠古星象石碑（新增解謎互動）
+                  Entity monolith = new Entity("npc_monolith", "monolith", "🗿 遠古星象碑", 7, 2);
+                  monolith.greeting = "石碑上刻著星界謎題：「唯有先照亮黑暗、再歸還星辰之人，方能開啟免費傳送通道。」";
+                  Choice ml1 = new Choice();
+                  ml1.label = "🌟 以古舊星盤折射星光解開謎題（共鳴+30，直接解鎖免費傳送權限 +50 EXP）";
+                  ml1.mana = 30; ml1.exp = 50; ml1.item = "星界傳送符"; ml1.addFlag = "HAS_TELEPORT_RUNE";
+                  ml1.log = "解開遠古星象碑謎題，取得星界傳送符。";
+                  ml1.reply = "石碑發出清脆的共鳴聲，一枚「星界傳送符」緩緩浮現於你掌心！";
+                  monolith.choices.add(ml1);
+                  entities.add(monolith);
+          
+                  // 3. 皇家符文寶箱
+                  Entity chest = new Entity("chest_armory", "chest", "皇家符文寶箱", 10, 3);
+                  chest.greeting = "上鎖的古老符文寶箱，散發著星界波動。";
+                  Choice cc1 = new Choice();
+                  cc1.label = "🔓 用星盤精準解鎖（星幣+50，獲「星界傳送符」+35 EXP）";
+                  cc1.gold = 50; cc1.exp = 35; cc1.item = "星界傳送符"; cc1.addFlag = "HAS_TELEPORT_RUNE";
+                  cc1.log = "解開皇家符文寶箱，取得星界傳送符與 50 星幣。";
+                  cc1.reply = "你獲得了「星界傳送符」，啟動北側傳送陣時將不需消耗自身共鳴！";
+                  Choice cc2 = new Choice();
+                  cc2.label = "🔨 暴力劈開寶箱（HP-10，星幣+85 +35 EXP）";
+                  cc2.hp = -10; cc2.gold = 85; cc2.exp = 35; cc2.trait = "果斷掠奪者"; cc2.addFlag = "LOOTED_BY_FORCE";
+                  cc2.log = "暴力劈開寶箱奪取 85 星幣。";
+                  cc2.reply = "符文碎裂震傷了你的手，但你搜刮了滿滿一袋星幣！";
+                  chest.choices.add(cc1); chest.choices.add(cc2);
+                  entities.add(chest);
+          
+                  // 4. 黑市星商卡洛
+                  Entity merchant = new Entity("npc_merchant", "npc", "黑市星商卡洛", 12, 9);
+                  merchant.roleStyle = "ranger";
+                  merchant.greeting = "「嘿！不管你是要徒步走古道還是搭傳送陣，帶把神兵或聖泉總沒錯吧？」";
+                  Choice sc1 = new Choice();
+                  sc1.label = "🗡️ 購買「斬鐵星刃」（花費 40 星幣，攻擊力+18 且光劍進化為紫金雷鳴劍）";
+                  sc1.gold = -40; sc1.exp = 30; sc1.item = "斬鐵星刃";
+                  sc1.log = "向黑市星商購買「斬鐵星刃」，武器進化為紫金雷鳴劍。";
+                  sc1.reply = "你握住「斬鐵星刃」，劍身纏繞著耀眼的紫金雷電，攻擊力大幅飆升！";
+                  Choice sc2 = new Choice();
+                  sc2.label = "🧪 購買「星輝聖泉」（花費 25 星幣，HP +40、共鳴 +25）";
+                  sc2.gold = -25; sc2.hp = 40; sc2.mana = 25; sc2.exp = 20;
+                  sc2.log = "購買星輝聖泉恢復狀態。";
+                  sc2.reply = "飲下聖泉後，全身充滿澎湃的星界力量！";
+                  merchant.choices.add(sc1); merchant.choices.add(sc2);
+                  entities.add(merchant);
+          
+                  // 5. 重裝星界哨兵（具巡邏 AI）
+                  Entity sentinel = new Entity("mob_sentinel", "monster", "重裝星界哨兵", 16, 7);
+                  sentinel.roleStyle = "mecha";
+                  sentinel.patrolRange = 2;
+                  sentinel.greeting = "重裝星界哨兵展開雙肩離子砲：「警告—偵測到通行者，請證明權限或接受殲滅！」";
+          
+                  Choice mc1 = new Choice();
+                  mc1.label = "⚔️ 揮劍斬斷核心徹底摧毀它（HP-15，星幣+65，獲「哨兵殘骸核心」+60 EXP）";
+                  mc1.hp = -15; mc1.gold = 65; mc1.exp = 60; mc1.item = "哨兵殘骸核心"; mc1.trait = "鋼鐵破壞者";
+                  mc1.addFlag = "DESTROYED_SENTINEL"; mc1.removeFlag = "TAMED_SENTINEL";
+                  mc1.log = "徹底斬毀了重裝星界哨兵，觸發機械中樞的復仇協定。";
+                  mc1.reply = "哨兵爆炸倒地，但死前向下一區發出了「機械復仇追殺令」！";
+          
+                  Choice mc2 = new Choice();
+                  mc2.label = "🔧 用星盤改寫晶片收服為隨身夥伴（共鳴-15，獲「浮游機甲夥伴」+60 EXP）";
+                  mc2.mana = -15; mc2.exp = 60; mc2.item = "浮游機甲夥伴"; mc2.trait = "機械統御者";
+                  mc2.addFlag = "TAMED_SENTINEL"; mc2.removeFlag = "DESTROYED_SENTINEL";
+                  mc2.log = "成功改寫哨兵晶片，收服為隨身浮游機甲夥伴。";
+                  mc2.reply = "哨兵化為小型浮游機甲跟隨在你身後：「主人，護衛模式已啟動！」";
+          
+                  sentinel.choices.add(mc1); sentinel.choices.add(mc2);
+                  entities.add(sentinel);
+          
+                  // 6. 北側：🔮 古代傳送陣 ＆ 東側：🚪 邊境古道口
+                  entities.add(new Entity("exit_teleport", "teleport", "🔮 古代傳送陣(安全直達)", 14, 2));
+                  entities.add(new Entity("exit_road", "road_gate", "🚪 邊境古道(徒步前往下一區)", 22, 7));
+              }
+          
+              // ==================== 徒步遠征古道地圖（具巡邏伏兵與靈草補給） ====================
+              void startRoadExpedition() {
+                  isRoadMap = true;
+                  targetWalkX = -1; targetWalkY = -1;
+                  for (int r = 0; r < WORLD_ROWS; r++) {
+                      for (int c = 0; c < WORLD_COLS; c++) {
+                          if (r < 4 || r > 9 || c == 0 || c == WORLD_COLS - 1) grid[r][c] = 1;
+                          else if (r == 6 || r == 7) grid[r][c] = 3;
+                          else grid[r][c] = 0;
+                      }
+                  }
+                  grid[5][6] = 4; grid[8][13] = 4; grid[5][19] = 4; // 古道沿途靈草
+                  grid[5][9] = 2; grid[8][15] = 2;
+                  px = 2; py = 7; renderPx = 2f; renderPy = 7f;
+                  entities.clear();
+          
+                  Entity ambush1 = new Entity("road_ambush_1", "monster", "荒野伏兵", 10, 7);
+                  ambush1.patrolRange = 2;
+                  if (worldFlags.contains("OVERLOADED_GATE")) {
+                      ambush1.name = "裂隙噬星獵犬"; ambush1.roleStyle = "beast";
+                      ambush1.greeting = "因為你先前強行超載了星門，被能量吸引的「裂隙噬星獵犬」在古道半路撲向你！";
+                      Choice a1 = new Choice();
+                      a1.label = "⚡ 引爆「超載核心」震退獵犬（共鳴-10，獲「獵犬星牙」+50 EXP）";
+                      a1.mana = -10; a1.exp = 50; a1.item = "獵犬星牙";
+                      a1.log = "在徒步古道遭遇因超載引來的噬星獵犬，引爆能量將其擊退。";
+                      a1.reply = "狂暴的星界衝擊波震飛了獵犬，你得以繼續前行！";
+                      ambush1.choices.add(a1);
+                  } else {
+                      ambush1.name = "荒野劫掠團伏兵"; ambush1.roleStyle = "bandit";
+                      ambush1.greeting = "你選擇徒步走過邊境古道，埋伏在峽谷兩側的「荒野劫掠團」跳出來攔住了去路：「留下買路財！」";
+                      Choice a1 = new Choice();
+                      a1.label = "⚔️ 拔劍正面擊潰劫掠團（HP-10，奪回星幣+50，+45 EXP）";
+                      a1.hp = -10; a1.gold = 50; a1.exp = 45; a1.addFlag = "DEFEATED_ROAD_BANDITS";
+                      a1.log = "徒步古道遭遇劫掠團伏擊，正面將其擊潰。";
+                      a1.reply = "劫掠團見你劍術凌厲，丟下贓物狼狽逃竄！";
+                      ambush1.choices.add(a1);
+                  }
+                  if (worldFlags.contains("TAMED_SENTINEL")) {
+                      Choice droneOpt = new Choice();
+                      droneOpt.label = "🤖 【機甲夥伴專屬】派隨身浮游機甲發射雷射掃蕩（無傷通過，星幣+45，+50 EXP）";
+                      droneOpt.gold = 45; droneOpt.exp = 50;
+                      droneOpt.log = "在古道遭遇襲擊時，派出先前收服的浮游機甲無傷解決敵人。";
+                      droneOpt.reply = "身後的浮游機甲精準鎖定目標，一發離子光束瞬間清空了道路！";
+                      ambush1.choices.add(droneOpt);
+                  }
+                  entities.add(ambush1);
+          
+                  Entity ambush2 = new Entity("road_ambush_2", "monster", "古道強敵", 17, 6);
+                  ambush2.patrolRange = 2;
+                  if (worldFlags.contains("DESTROYED_SENTINEL")) {
+                      ambush2.type = "monster"; ambush2.roleStyle = "mecha";
+                      ambush2.name = "復仇者追獵機兵";
+                      ambush2.greeting = "「偵測到摧毀哨兵之兇手——執行抹殺！」因為你先前摧毀了哨兵，追兵在古道後半段攔截了你！";
+                      Choice b1 = new Choice();
+                      b1.label = "⚔️ 苦戰突圍（HP-15，星幣+60，獲「高階裝甲片」+55 EXP）";
+                      b1.hp = -15; b1.gold = 60; b1.exp = 55; b1.item = "高階裝甲片";
+                      b1.log = "在古道擊退了因摧毀哨兵而來的復仇追獵機兵。";
+                      b1.reply = "你冒著砲火斬斷追兵機翼，終於看見前方的區域大門！";
+                      ambush2.choices.add(b1);
+                  } else if (worldFlags.contains("PROTECTED_VILLAGE")) {
+                      ambush2.type = "npc"; ambush2.roleStyle = "ranger"; ambush2.patrolRange = 0;
+                      ambush2.name = "邊境巡守隊長";
+                      ambush2.greeting = "「原來是保護了星門村莊的恩人！古道後半段已被我們肅清，這是給你的遠征補給。」";
+                      Choice b1 = new Choice();
+                      b1.label = "💚 接受巡守隊補給（HP+30，共鳴+20，+45 EXP）";
+                      b1.hp = 30; b1.mana = 20; b1.exp = 45;
+                      b1.log = "因先前保護村莊，在古道獲得巡守隊長的醫療補給。";
+                      b1.reply = "你的體力充沛地恢復了，前方就是下一區的入口！";
+                      ambush2.choices.add(b1);
+                  } else {
+                      ambush2.type = "monster"; ambush2.roleStyle = "beast";
+                      ambush2.name = "古道迷霧魔狼";
+                      ambush2.greeting = "古道終點前，一頭飢餓的迷霧魔狼正擋在路中央低吼！";
+                      Choice b1 = new Choice();
+                      b1.label = "🗡️ 迎戰擊退魔狼（HP-10，星幣+40，+45 EXP）";
+                      b1.hp = -10; b1.gold = 40; b1.exp = 45;
+                      b1.log = "在古道終點前擊退迷霧魔狼。";
+                      b1.reply = "魔狼哀嚎一聲退入迷霧中，前方的區域大門就在眼前！";
+                      ambush2.choices.add(b1);
+                  }
+                  entities.add(ambush2);
+          
+                  entities.add(new Entity("road_finish", "road_finish", "🏰 抵達下一區入口", 22, 7));
+                  addLog("🥾 【徒步遠征古道】你可以直接點擊右側古道地面讓主角自動走過去，也可以在靠近伏兵前先按「🗡️斬擊/脈衝」破甲擊暈敵人！");
+                  spawnFloat("🥾 開始徒步遠征！", px, py, Color.rgb(251, 191, 36));
+              }
+          
+              // ==================== 玩家移動、自動尋路與怪物巡邏 AI ====================
+              void updateMonsterPatrols() {
+                  if (inTitleScreen || isGenerating) return;
+                  for (Entity e : entities) {
+                      if ("monster".equals(e.type) && e.patrolRange > 0 && !e.stunned) {
+                          int dir = rnd.nextBoolean() ? 1 : -1;
+                          int ny = e.y + dir;
+                          if (Math.abs(ny - e.homeY) <= e.patrolRange && ny > 1 && ny < WORLD_ROWS - 1 && grid[ny][e.x] != 1) {
+                              if (!(e.x == px && ny == py)) {
+                                  e.y = ny;
+                              }
+                          }
+                      }
+                  }
+              }
+          
+              void stepAutoWalk() {
+                  if (inTitleScreen || isGenerating || (targetWalkX == -1 && targetWalkY == -1)) return;
+                  if (px == targetWalkX && py == targetWalkY) {
+                      targetWalkX = -1; targetWalkY = -1;
+                      return;
+                  }
+                  int dx = Integer.compare(targetWalkX, px);
+                  int dy = Integer.compare(targetWalkY, py);
+                  if (dx != 0 && grid[py][px + dx] != 1) {
+                      movePlayer(dx, 0, false);
+                  } else if (dy != 0 && grid[py + dy][px] != 1) {
+                      movePlayer(0, dy, false);
+                  } else {
+                      targetWalkX = -1; targetWalkY = -1;
+                  }
+              }
+          
+              void movePlayer(int dx, int dy, boolean cancelAutoTarget) {
+                  if (inTitleScreen || isGenerating) return;
+                  if (cancelAutoTarget) { targetWalkX = -1; targetWalkY = -1; }
+                  facingX = dx != 0 ? dx : facingX;
+                  facingY = dy != 0 ? dy : facingY;
+                  walkCycle += 1.2f;
+          
+                  int nx = px + dx, ny = py + dy;
+                  if (nx < 0 || nx >= WORLD_COLS || ny < 0 || ny >= WORLD_ROWS || grid[ny][nx] == 1 || grid[ny][nx] == 5) {
+                      targetWalkX = -1; targetWalkY = -1;
+                      if (nx >= 0 && nx < WORLD_COLS && ny >= 0 && ny < WORLD_ROWS && grid[ny][nx] == 5) {
+                          spawnFloat("🧱 裂縫牆(按右下斬擊/脈衝震碎)", nx, ny, Color.rgb(251, 191, 36));
+                      } else {
+                          spawnFloat("受阻", nx, ny, Color.rgb(148, 163, 184));
+                      }
+                      return;
+                  }
+                  for (Entity e : entities) {
+                      if (e.x == nx && e.y == ny) {
+                          targetWalkX = -1; targetWalkY = -1;
+                          interactEntity(e);
+                          return;
+                      }
+                  }
+                  px = nx; py = ny;
+          
+                  // 踩上星光靈草 (4) 自動採集回血回魔
+                  if (grid[ny][nx] == 4) {
+                      grid[ny][nx] = 0;
+                      hp = Math.min(maxHp, hp + 22);
+                      mana = Math.min(maxMana, mana + 15);
+                      gainExp(15);
+                      spawnFloat("🌿 採集星光草 +22HP +15✨", px, py, Color.rgb(52, 211, 153));
+                  } else if (grid[ny][nx] == 2) {
+                      int dmg = Math.max(1, 4 - def / 5);
+                      hp = Math.max(1, hp - dmg);
+                      spawnFloat("-" + dmg + " HP 能量地形", px, py, Color.rgb(244, 63, 94));
+                  }
+          
+                  if (isRoadMap) {
+                      for (Entity e : entities) {
+                          if ("monster".equals(e.type) && !e.triggered && !e.stunned && Math.abs(e.x - px) <= 1 && Math.abs(e.y - py) <= 1) {
+                              e.triggered = true;
+                              targetWalkX = -1; targetWalkY = -1;
+                              spawnFloat("⚠️ 遭遇伏擊！", px, py, Color.rgb(244, 63, 94));
+                              interactEntity(e);
+                              break;
+                          }
+                      }
+                  }
+              }
+          
+              void interactNearby() {
+                  if (inTitleScreen) return;
+                  for (Entity e : entities) {
+                      if (Math.abs(e.x - px) + Math.abs(e.y - py) <= 1) {
+                          interactEntity(e);
+                          return;
+                      }
+                  }
+                  spawnFloat("請先靠近目標", px, py, Color.rgb(203, 213, 225));
+              }
+          
+              void interactEntity(final Entity e) {
+                  if ("teleport".equals(e.type)) {
+                      handleTeleportChoice();
+                      return;
+                  }
+                  if ("road_gate".equals(e.type)) {
+                      new AlertDialog.Builder(this)
+                          .setTitle("🚪 邊境古道口（徒步前往下一區）")
+                          .setMessage("走古道不需消耗共鳴能量，但你必須親自操作角色走過荒野峽谷（可直接點擊古道地面自動行走），途中會根據你的因果旗標遭遇巡邏伏兵。\n\n確定要踏上古道嗎？")
+                          .setPositiveButton("🥾 踏上古道（親自走過去）", new DialogInterface.OnClickListener() {
+                              @Override
+                              public void onClick(DialogInterface d, int w) {
+                                  startRoadExpedition();
+                              }
+                          })
+                          .setNegativeButton("暫留本區", null)
+                          .show();
+                      return;
+                  }
+                  if ("road_finish".equals(e.type)) {
+                      triggerAutoCausalNextZone("WALK_ROAD", "");
+                      return;
+                  }
+          
+                  final ArrayList<Choice> validChoices = new ArrayList<Choice>();
+                  for (Choice ch : e.choices) {
+                      if (checkChoiceAllowed(ch)) validChoices.add(ch);
+                  }
+          
+                  // 若敵人已被玩家先手「星輝斬擊/脈衝」擊暈破甲，自動新增無傷處決選項！
+                  if ("monster".equals(e.type) && e.stunned) {
+                      Choice stunWin = new Choice();
+                      stunWin.label = "💥 【破甲壓制】趁敵人暈眩直接無傷收繳戰利品（HP不損，星幣+80，+70 EXP）";
+                      stunWin.gold = 80; stunWin.exp = 70; stunWin.item = "破甲戰利徽記";
+                      stunWin.log = "先手破甲擊暈並無傷制服了 " + e.name + "！";
+                      stunWin.reply = e.name + " 因護甲碎裂無法反抗，只能交出所有寶物撤退！";
+                      validChoices.add(0, stunWin);
+                  }
+          
+                  if ("monster".equals(e.type) && isAllyOnline()) {
+                      Choice coop = new Choice();
+                      coop.label = "🤝 【區網雙人合擊】與連線盟友「" + ally.name + "」發動雙重奧義（無傷秒殺，星幣+100，+80 EXP）";
+                      coop.gold = 100; coop.mana = 15; coop.exp = 80; coop.item = "雙星共鳴徽章";
+                      coop.log = "與區網盟友「" + ally.name + "」聯手擊破了 " + e.name + "！";
+                      coop.reply = "你與盟友的星盤同時綻放萬丈光芒，瞬間瓦解了強敵！";
+                      validChoices.add(0, coop);
+                  }
+          
+                  AlertDialog.Builder b = new AlertDialog.Builder(this);
+                  b.setTitle("💬 " + e.name + (e.stunned ? "【💫破甲暈眩中】" : "") + "：" + e.greeting);
+                  String[] items = new String[validChoices.size() + 1];
+                  for (int i = 0; i < validChoices.size(); i++) items[i] = validChoices.get(i).label;
+                  items[validChoices.size()] = "✨ 輸入自訂行動（系統將自動推演因果）...";
+                  b.setItems(items, new DialogInterface.OnClickListener() {
+                      @Override
+                      public void onClick(DialogInterface d, int which) {
+                          if (which < validChoices.size()) {
+                              applyChoice(e, validChoices.get(which));
+                          } else {
+                              promptCustomAction(e);
+                          }
+                      }
+                  });
+                  if (!isRoadMap || !"monster".equals(e.type) || e.stunned) {
+                      b.setNegativeButton("關閉", null);
+                  }
+                  b.show();
+              }
+          
+              void handleTeleportChoice() {
+                  final boolean hasRune = worldFlags.contains("HAS_TELEPORT_RUNE") || inventory.contains("星界傳送符");
+                  String msg = hasRune
+                      ? "你持有「星界傳送符」，可免費啟動傳送陣！\n傳送將直接跨越荒野峽谷安全抵達下一區，完全不會遭遇古道伏擊事件。"
+                      : "啟動古代傳送陣需要消耗 25 點共鳴（目前共鳴：" + mana + "）。\n傳送可安全直達下一區，免去徒步走古道遭遇襲擊的麻煩！";
+          
+                  new AlertDialog.Builder(this)
+                      .setTitle("🔮 古代傳送星陣")
+                      .setMessage(msg)
+                      .setPositiveButton(hasRune ? "✨ 使用傳送符安全傳送" : "🔮 消耗 25 共鳴安全傳送", new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int w) {
+                              if (!hasRune && mana < 25) {
+                                  Toast.makeText(MainActivity.this, "共鳴不足 25 點！請先解開石碑謎題、開啟寶箱或改走東側「🚪邊境古道」。", Toast.LENGTH_LONG).show();
+                                  return;
+                              }
+                              if (!hasRune) mana -= 25;
+                              worldFlags.add("USED_SAFE_TELEPORT");
+                              gainExp(35);
+                              history.add("啟動古代傳送陣，避開荒野古道安全傳送至下一區。");
+                              spawnFloat("🔮 空間傳送啟動！", px, py, Color.rgb(56, 189, 248));
+                              triggerAutoCausalNextZone("TELEPORT", "");
+                          }
+                      })
+                      .setNegativeButton("取消", null)
+                      .show();
+              }
+          
+              void applyChoice(Entity e, Choice c) {
+                  if (c.gold < 0 && gold + c.gold < 0) {
+                      Toast.makeText(this, "星幣不足！", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  // 防禦力自動減免負面傷害
+                  int actualHpDelta = c.hp;
+                  if (actualHpDelta < 0) {
+                      actualHpDelta = Math.min(-1, actualHpDelta + def / 3);
+                  }
+                  hp = Math.max(1, Math.min(maxHp, hp + actualHpDelta));
+                  mana = Math.max(0, Math.min(maxMana, mana + c.mana));
+                  gold = Math.max(0, gold + c.gold);
+                  if (actualHpDelta != 0) spawnFloat((actualHpDelta > 0 ? "+" : "") + actualHpDelta + " HP", px, py, actualHpDelta > 0 ? Color.rgb(52, 211, 153) : Color.rgb(251, 113, 133));
+                  if (c.mana != 0) spawnFloat((c.mana > 0 ? "+" : "") + c.mana + " 共鳴", px, py - 0.4f, Color.rgb(129, 140, 248));
+                  if (c.trait != null && !c.trait.isEmpty()) trait = c.trait;
+                  if (c.addFlag != null && !c.addFlag.isEmpty()) worldFlags.add(c.addFlag);
+                  if (c.removeFlag != null && !c.removeFlag.isEmpty()) worldFlags.remove(c.removeFlag);
+                  if (c.item != null && !c.item.isEmpty() && !inventory.contains(c.item)) {
+                      inventory.add(c.item);
+                      recalcEquipmentStats();
+                      spawnFloat("獲得 " + c.item, e.x, e.y, Color.rgb(251, 191, 36));
+                  }
+                  gainExp(c.exp > 0 ? c.exp : 30);
+                  history.add("第" + zoneIndex + "區：" + c.log);
+                  addLog("👉 " + c.log);
+                  if (c.reply != null && !c.reply.isEmpty()) addLog("💬 " + c.reply);
+                  if ("chest".equals(e.type) || "monster".equals(e.type) || "monolith".equals(e.type) || isRoadMap) {
+                      entities.remove(e);
+                  }
+              }
+          
+              void promptCustomAction(final Entity e) {
+                  final EditText et = new EditText(this);
+                  et.setHint("輸入你對 " + e.name + " 的行動（系統將自動判斷後續因果）...");
+                  new AlertDialog.Builder(this)
+                      .setTitle("⚡ 自由行動（自動因果判定）")
+                      .setView(et)
+                      .setPositiveButton("執行行動", new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int w) {
+                              String act = et.getText().toString().trim();
+                              if (!act.isEmpty()) evaluateCustomActionCausality(e, act);
+                          }
+                      })
+                      .setNegativeButton("取消", null)
+                      .show();
+              }
+          
+              void evaluateCustomActionCausality(Entity e, String act) {
+                  if (act.contains("殺") || act.contains("斬") || act.contains("毀") || act.contains("攻擊") || act.contains("搶")) {
+                      worldFlags.add("HOSTILE_ACTION_" + e.id);
+                      worldFlags.add("RUTHLESS_PATH");
+                      worldFlags.remove("PEACEFUL_PATH");
+                      trait = "冷酷破局者";
+                      gold += 45;
+                      hp = Math.max(1, hp - 8);
+                      gainExp(45);
+                      entities.remove(e);
+                      addLog("⚔️ 你對「" + e.name + "」採取了強硬手段：「" + act + "」！該角色已從世界消失，後續將不會再出現其友好事件。");
+                  } else if (act.contains("幫") || act.contains("救") || act.contains("治") || act.contains("送") || act.contains("結盟") || act.contains("收服")) {
+                      worldFlags.add("ALLIED_WITH_" + e.id);
+                      worldFlags.add("PEACEFUL_PATH");
+                      if ("mob_sentinel".equals(e.id)) worldFlags.add("TAMED_SENTINEL");
+                      trait = "星界締結者";
+                      mana = Math.min(maxMana, mana + 15);
+                      gainExp(45);
+                      if ("monster".equals(e.type)) entities.remove(e);
+                      addLog("🤝 你對「" + e.name + "」採取了結盟行動：「" + act + "」！已鎖定友好因果線，排除後續與其敵對的矛盾事件。");
+                  } else {
+                      worldFlags.add("CUSTOM_ACT_" + e.id);
+                      mana = Math.min(maxMana, mana + 10);
+                      trait = "奇策探索者";
+                      gainExp(35);
+                      if (isRoadMap) entities.remove(e);
+                      addLog("✨ 你對「" + e.name + "」執行了：「" + act + "」，世界因果線已自動調整！");
+                  }
+                  history.add("第" + zoneIndex + "區自訂行動：對 " + e.name + "「" + act + "」");
+                  spawnFloat("⚖️ 因果線已更新", px, py, Color.rgb(56, 189, 248));
+              }
+          
+              // ==================== 多模型自動容錯 API 呼叫與因果生成 ====================
+              void triggerAutoCausalNextZone(final String travelMode, final String extraNote) {
+                  if (isGenerating) return;
+                  isGenerating = true;
+                  targetWalkX = -1; targetWalkY = -1;
+                  addLog("⏳ 正在根據你的行動旗標 " + worldFlags.toString() + " 自動推演下一區...");
+          
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          JSONObject result = null;
+                          if (apiKey != null && !apiKey.isEmpty()) {
+                              result = callGeminiWithModelFallback(travelMode, extraNote);
+                          }
+                          final JSONObject finalData = (result != null) ? result : buildCausalLocalZone(travelMode);
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  applyNewZone(finalData, travelMode);
+                                  isGenerating = false;
+                                  saveGameToSlot(1);
+                              }
+                          });
+                      }
+                  }).start();
+              }
+          
+              JSONObject callGeminiWithModelFallback(String travelMode, String extraNote) {
+                  String[] candidateModels = {
+                      "gemini-2.5-flash",
+                      "gemini-2.0-flash",
+                      "gemini-3.8-flash",
+                      "gemini-4-argon"
+                  };
+                  int nextNum = zoneIndex + 1;
+                  String prompt = "你是 2D 遊戲《星界迴響》的「因果律檢核與劇本生成引擎」。請為玩家生成第 " + nextNum + " 區。"
+                      + "\n1. 玩家已觸發的世界旗標：" + worldFlags.toString()
+                      + "\n2. 玩家完整行動紀錄：" + history.toString()
+                      + "\n3. 玩家進入本區的方式：" + ("TELEPORT".equals(travelMode) ? "透過古代傳送陣安全直達" : "親自徒步走過荒野古道抵達")
+                      + "\n4. 玩家持有道具：" + inventory.toString() + "，等級 Lv." + level + "，傾向：" + trait
+                      + "\n5. 嚴格排除任何與上述旗標矛盾的事件，並提供符合當下行動的選擇。"
+                      + "\n請只回傳純 JSON 物件：{\"zoneTitle\":\"區域名稱\",\"biome\":\"forest或cyber或volcano或ruins\",\"openingNarration\":\"開場白(60字內)\",\"npcName\":\"符合因果的新NPC\",\"npcRole\":\"mage或ranger或mecha\",\"npcGreeting\":\"明確提到玩家上一區具體行為的台詞\",\"choice1Label\":\"符合當前狀態的選擇1\",\"choice1Item\":\"新道具\",\"choice1Flag\":\"NEW_FLAG_1\",\"choice1Reply\":\"回應1\",\"choice2Label\":\"符合當前狀態的選擇2\",\"choice2Flag\":\"NEW_FLAG_2\",\"choice2Reply\":\"回應2\",\"chestName\":\"寶箱名\",\"chestItem\":\"寶物名\",\"mobName\":\"符合因果的強敵名\",\"mobRole\":\"mecha或beast或bandit\",\"mobGreeting\":\"強敵台詞\",\"mobChoice1\":\"迎戰選項\",\"mobChoice2\":\"符合玩家持有道具的智取選項\"}";
+          
+                  for (final String modelName : candidateModels) {
+                      try {
+                          String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + modelName + ":generateContent?key=" + apiKey.trim();
+                          URL url = new URL(endpoint);
+                          HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                          conn.setConnectTimeout(12000);
+                          conn.setReadTimeout(18000);
+                          conn.setRequestMethod("POST");
+                          conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                          conn.setDoOutput(true);
+          
+                          JSONObject reqBody = new JSONObject();
+                          JSONArray contents = new JSONArray();
+                          JSONObject partObj = new JSONObject().put("text", prompt);
+                          contents.put(new JSONObject().put("parts", new JSONArray().put(partObj)));
+                          reqBody.put("contents", contents);
+                          reqBody.put("generationConfig", new JSONObject().put("responseMimeType", "application/json"));
+          
+                          OutputStream os = conn.getOutputStream();
+                          os.write(reqBody.toString().getBytes("UTF-8"));
+                          os.close();
+          
+                          int code = conn.getResponseCode();
+                          if (code >= 200 && code < 300) {
+                              BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+                              StringBuilder sb = new StringBuilder();
+                              String line;
+                              while ((line = br.readLine()) != null) sb.append(line);
+                              br.close();
+          
+                              JSONObject respJson = new JSONObject(sb.toString());
+                              String raw = respJson.getJSONArray("candidates").getJSONObject(0)
+                                  .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text");
+                              raw = raw.replace("```json", "").replace("```", "").trim();
+                              JSONObject parsed = new JSONObject(raw);
+                              activeModelUsed = "雲端 AI (" + modelName + ")";
+                              return parsed;
+                          }
+                      } catch (Exception ignored) {}
+                  }
+                  activeModelUsed = "本機因果檢核引擎";
+                  return null;
+              }
+          
+              JSONObject buildCausalLocalZone(String travelMode) {
+                  int nextNum = zoneIndex + 1;
+                  String zoneLetter = String.valueOf((char)('A' + (nextNum - 1)));
+                  boolean tamedSentinel = worldFlags.contains("TAMED_SENTINEL");
+                  boolean destroyedSentinel = worldFlags.contains("DESTROYED_SENTINEL");
+                  boolean protectedVillage = worldFlags.contains("PROTECTED_VILLAGE");
+                  boolean overloadedGate = worldFlags.contains("OVERLOADED_GATE");
+                  boolean isTeleport = "TELEPORT".equals(travelMode);
+          
+                  JSONObject obj = new JSONObject();
+                  try {
+                      String travelDesc = isTeleport
+                          ? "你透過古代傳送陣的空間光束直接降臨此區，避開了荒野古道的奔波；"
+                          : "你風塵僕僕地從荒野古道徒步走入此區，沿途擊退伏兵的事蹟已傳開；";
+          
+                      if (tamedSentinel) {
+                          obj.put("zoneTitle", zoneLetter + "區：機械中樞迴廊");
+                          obj.put("biome", "cyber");
+                          obj.put("openingNarration", travelDesc + "因為你身邊跟著被你收服的「浮游機甲夥伴」，此區的防禦砲塔全數將你識別為友軍！");
+                          obj.put("npcName", "機巧長老樞機");
+                          obj.put("npcRole", "mecha");
+                          obj.put("npcGreeting", "「驚人！你竟然沒有摧毀星界哨兵，而是將它改寫為夥伴。中樞願意向你開放高階權限！」");
+                          obj.put("choice1Label", "🤖 讓浮游機甲與中樞同步升級（共鳴+25，獲「量子推進器」+55 EXP）");
+                          obj.put("choice1Item", "量子推進器");
+                          obj.put("choice1Flag", "UPGRADED_DRONE");
+                          obj.put("choice1Reply", "你的浮游機甲夥伴進化為金色武裝型態，戰力大增！");
+                          obj.put("choice2Label", "🔑 索取下一區的傳送陣免費通行碼（獲「星界傳送符」+45 EXP）");
+                          obj.put("choice2Flag", "HAS_TELEPORT_RUNE");
+                          obj.put("choice2Reply", "長老將一枚新的傳送符交給了你！");
+                      } else if (destroyedSentinel) {
+                          obj.put("zoneTitle", zoneLetter + "區：鋼鐵警戒要塞");
+                          obj.put("biome", "cyber");
+                          obj.put("openingNarration", travelDesc + "因為你先前摧毀了星界哨兵，要塞內響起了紅色警報，所有友善機械事件已被封鎖！");
+                          obj.put("npcName", "地下反抗軍密探");
+                          obj.put("npcRole", "ranger");
+                          obj.put("npcGreeting", "「幹得好！我們看到你斬碎了那台哨兵，拿著你手上的『哨兵殘骸核心』，我們能幫你鍛造破甲重劍！」");
+                          obj.put("choice1Label", "⚒️ 用「哨兵殘骸核心」鍛造破甲重劍（HP+25，獲「斬鐵星刃」攻擊+18）");
+                          obj.put("choice1Item", "斬鐵星刃");
+                          obj.put("choice1Flag", "FORGED_ANTI_MECH_BLADE");
+                          obj.put("choice1Reply", "密探將核心熔鑄進你的劍刃中，你的光劍進化為紫金雷鳴重劍！");
+                          obj.put("choice2Label", "💣 聯手在要塞埋設電磁陷阱（共鳴+20，星幣+55）");
+                          obj.put("choice2Flag", "SABOTAGED_FORTRESS");
+                          obj.put("choice2Reply", "電磁陷阱已部署完成，前方領主的護盾已被削弱！");
+                      } else if (protectedVillage) {
+                          obj.put("zoneTitle", zoneLetter + "區：翡翠誓約之森");
+                          obj.put("biome", "forest");
+                          obj.put("openingNarration", travelDesc + "守門人艾琳的飛鴿傳書已先一步抵達，森林守望者們紛紛出來迎接守護村莊的英雄！");
+                          obj.put("npcName", "大德魯伊瑟蘭");
+                          obj.put("npcRole", "mage");
+                          obj.put("npcGreeting", "「配戴『守護紋章』的旅人，感謝你沒有為了一己之私抽乾村莊結界。請接受森林的祝福！」");
+                          obj.put("choice1Label", "🌿 接受生命之樹洗禮（HP+35，獲「翡翠聖葉」+55 EXP）");
+                          obj.put("choice1Item", "翡翠聖葉");
+                          obj.put("choice1Flag", "BLESSED_BY_FOREST");
+                          obj.put("choice1Reply", "翠綠的光芒包圍全身，你的傷勢痊癒且生命力更加旺盛！");
+                          obj.put("choice2Label", "🗺️ 請教安全避開前方古道伏兵的秘徑（共鳴+20，獲「星界傳送符」）");
+                          obj.put("choice2Flag", "HAS_TELEPORT_RUNE");
+                          obj.put("choice2Reply", "德魯伊贈予你傳送符，讓你隨時能安全使用北側傳送陣！");
+                      } else {
+                          obj.put("zoneTitle", zoneLetter + "區：緋紅裂谷禁地");
+                          obj.put("biome", "volcano");
+                          obj.put("openingNarration", travelDesc + "因你先前強行超載星門引發時空震盪，這片區域的地脈熔岩正處於狂暴狀態！");
+                          obj.put("npcName", "深淵煉金師莫德");
+                          obj.put("npcRole", "mage");
+                          obj.put("npcGreeting", "「哈哈！就是你把星門超載搞得天翻地覆吧？拿『超載核心』來跟我做筆交易如何？」");
+                          obj.put("choice1Label", "🔥 將超載核心提煉為禁忌秘藥（共鳴+30，獲「深淵魔晶」攻擊+18）");
+                          obj.put("choice1Item", "深淵魔晶");
+                          obj.put("choice1Flag", "ABYSS_PACT");
+                          obj.put("choice1Reply", "煉金爐爆出紫紅火光，你獲得了威力驚人的深淵魔晶！");
+                          obj.put("choice2Label", "🪙 把多餘的裂隙能量賣給他（星幣+95）");
+                          obj.put("choice2Flag", "SOLD_OVERLOAD_ENERGY");
+                          obj.put("choice2Reply", "莫德大笑著付給你滿滿一大袋星幣！");
+                      }
+          
+                      obj.put("chestName", "區域共鳴秘寶箱");
+                      obj.put("chestItem", "星界聖遺物·" + zoneLetter);
+                      obj.put("mobName", destroyedSentinel ? "審判長機神·阿瑞斯" : (overloadedGate ? "緋紅裂隙炎魔" : "邊境守衛統領"));
+                      obj.put("mobRole", destroyedSentinel ? "mecha" : (overloadedGate ? "beast" : "bandit"));
+                      obj.put("mobGreeting", destroyedSentinel
+                          ? "「你毀滅了我方哨兵，本機將親自執行死刑！」"
+                          : "「想通往下一區的古道或傳送陣，先問過我手上的兵刃！」");
+                      obj.put("mobChoice1", "⚔️ 正面決戰擊破統領（HP-15，星幣+85，獲「統領徽記」+70 EXP）");
+                      obj.put("mobChoice2", tamedSentinel
+                          ? "🤖 與浮游機甲發動合體雷射無傷擊破（共鳴-10，星幣+95，+75 EXP）"
+                          : "🌟 運用背包中的最新信物壓制對手（共鳴-10，HP+10，星幣+75，+65 EXP）");
+                  } catch (Exception ignored) {}
+                  return obj;
+              }
+          
+              void applyNewZone(JSONObject d, String travelMode) {
+                  isRoadMap = false;
+                  targetWalkX = -1; targetWalkY = -1;
+                  zoneIndex++;
+                  zoneTitle = d.optString("zoneTitle", "第" + zoneIndex + "區：未知星域");
+                  biome = d.optString("biome", "forest");
+          
+                  for (int r = 0; r < WORLD_ROWS; r++) {
+                      for (int c = 0; c < WORLD_COLS; c++) {
+                          if (r == 0 || r == WORLD_ROWS - 1 || c == 0 || c == WORLD_COLS - 1) grid[r][c] = 1;
+                          else if (r == 7 && c >= 2 && c <= 22) grid[r][c] = 3;
+                          else if (c == 14 && r >= 2 && r <= 7) grid[r][c] = 3;
+                          else grid[r][c] = 0;
+                      }
+                  }
+                  int[][] walls = {{7,2},{7,3},{7,10},{7,11},{12,4},{12,5},{16,9},{16,10}};
+                  for (int[] w : walls) grid[w[1]][w[0]] = 1;
+                  grid[3][7] = 5; grid[10][12] = 5; // 裂縫密室牆
+                  grid[2][5] = 4; grid[11][6] = 4; grid[5][19] = 4; // 星光靈草
+                  grid[4][9] = 2; grid[9][13] = 2; grid[4][18] = 2;
+          
+                  px = 3; py = 7; renderPx = 3f; renderPy = 7f;
+                  entities.clear();
+          
+                  Entity npc = new Entity("npc_z" + zoneIndex, "npc", d.optString("npcName", "區域引路人"), 6, 6);
+                  npc.roleStyle = d.optString("npcRole", "mage");
+                  npc.greeting = d.optString("npcGreeting", "「你的過去決定了今日的相遇。」");
+                  Choice c1 = new Choice();
+                  c1.label = d.optString("choice1Label", "進行因果共鳴");
+                  c1.mana = 20; c1.hp = 15; c1.exp = 50; c1.item = d.optString("choice1Item", "星界符印");
+                  c1.addFlag = d.optString("choice1Flag", "ZONE_" + zoneIndex + "_ALLY");
+                  c1.log = "與 " + npc.name + " 完成因果互動。"; c1.reply = d.optString("choice1Reply", "獲得新的祝福！");
+                  Choice c2 = new Choice();
+                  c2.label = d.optString("choice2Label", "索取區域支援");
+                  c2.gold = 60; c2.mana = 15; c2.exp = 45;
+                  c2.addFlag = d.optString("choice2Flag", "ZONE_" + zoneIndex + "_SUPPORT");
+                  if (c2.label.contains("傳送符")) c2.item = "星界傳送符";
+                  c2.log = "從 " + npc.name + " 取得支援。"; c2.reply = d.optString("choice2Reply", "祝你一路順風！");
+                  npc.choices.add(c1); npc.choices.add(c2);
+                  entities.add(npc);
+          
+                  Entity chest = new Entity("chest_z" + zoneIndex, "chest", d.optString("chestName", "星界秘寶箱"), 10, 3);
+                  chest.greeting = "散發著星輝的區域寶箱。";
+                  Choice cc = new Choice();
+                  cc.label = "💎 開啟寶箱並補充傳送能量（共鳴+25，星幣+55，+40 EXP）";
+                  cc.mana = 25; cc.gold = 55; cc.exp = 40; cc.item = d.optString("chestItem", "星界秘寶");
+                  cc.log = "開啟了 " + chest.name + "。"; cc.reply = "獲得珍貴秘寶與共鳴能量！";
+                  chest.choices.add(cc);
+                  entities.add(chest);
+          
+                  Entity mob = new Entity("mob_z" + zoneIndex, "monster", d.optString("mobName", "區域統領"), 16, 7);
+                  mob.roleStyle = d.optString("mobRole", "mecha");
+                  mob.patrolRange = 2;
+                  mob.greeting = d.optString("mobGreeting", "「證明你的實力吧！」");
+                  Choice mc1 = new Choice();
+                  mc1.label = d.optString("mobChoice1", "⚔️ 正面迎戰擊破統領（HP-15，星幣+85，+70 EXP）");
+                  mc1.hp = -15; mc1.gold = 85; mc1.exp = 70; mc1.item = "統領之證·" + zoneIndex;
+                  mc1.log = "正面擊敗了 " + mob.name + "。"; mc1.reply = "統領倒下，前往下一區的道路已暢通！";
+                  Choice mc2 = new Choice();
+                  mc2.label = d.optString("mobChoice2", "🌟 運用信物與智慧壓制統領（共鳴-10，星幣+75，+65 EXP）");
+                  mc2.mana = -10; mc2.hp = 10; mc2.gold = 75; mc2.exp = 65;
+                  mc2.log = "巧妙壓制了 " + mob.name + "。"; mc2.reply = "統領對你的實力心服口服，主動讓開了道路！";
+                  mob.choices.add(mc1); mob.choices.add(mc2);
+                  entities.add(mob);
+          
+                  entities.add(new Entity("exit_teleport_" + zoneIndex, "teleport", "🔮 古代傳送陣(安全直達)", 14, 2));
+                  entities.add(new Entity("exit_road_" + zoneIndex, "road_gate", "🚪 邊境古道(徒步前往下一區)", 22, 7));
+          
+                  spawnFloat("✨ 抵達 " + zoneTitle, px, py, Color.rgb(192, 132, 252));
+                  addLog("🎬 【" + zoneTitle + "】(" + activeModelUsed + ") " + d.optString("openingNarration", ""));
+              }
+          
+              void openSystemMenuDialog() {
+                  String[] menuItems = {
+                      "💾 儲存進度 (3 個存檔槽)",
+                      "📂 讀取進度 (3 個存檔槽)",
+                      "📡 區網雙人共遊 ＆ 喊話 (" + (isAllyOnline() ? "已連上：" + ally.name : (lanEnabled ? "搜尋中" : "未開啟")) + ")",
+                      "📊 查看角色詳細屬性與因果紀錄",
+                      "⚙️ Gemini API 金鑰設定",
+                      "🏠 返回遊戲主畫面 (Title Screen)"
+                  };
+                  new AlertDialog.Builder(this)
+                      .setTitle("🧭 系統選單 ＆ 區網共遊")
+                      .setItems(menuItems, new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int which) {
+                              if (which == 0) openSaveLoadDialog(true);
+                              else if (which == 1) openSaveLoadDialog(false);
+                              else if (which == 2) openLanDialog();
+                              else if (which == 3) showCharacterSheetDialog();
+                              else if (which == 4) openApiKeyDialog();
+                              else if (which == 5) inTitleScreen = true;
+                          }
+                      })
+                      .setNegativeButton("繼續遊戲", null)
+                      .show();
+              }
+          
+              void showCharacterSheetDialog() {
+                  String info = "【角色名稱】" + playerName + " (Lv." + level + " " + trait + ")\n"
+                      + "【經驗進度】" + exp + " / " + nextExp + " EXP\n"
+                      + "【生命與共鳴】❤️ " + hp + "/" + maxHp + "  |  ✨ " + mana + "/" + maxMana + "\n"
+                      + "【戰鬥能力】⚔️ 攻擊力：" + atk + "  |  🛡️ 防禦力：" + def + "\n"
+                      + "【持有信物】" + inventory.toString() + "\n"
+                      + "【生效因果旗標】" + (worldFlags.isEmpty() ? "[初始狀態]" : worldFlags.toString());
+                  new AlertDialog.Builder(this)
+                      .setTitle("📊 角色面板與世界因果律")
+                      .setMessage(info)
+                      .setPositiveButton("確定", null)
+                      .show();
+              }
+          
+              void openApiKeyDialog() {
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(36, 20, 36, 10);
+                  final EditText keyEt = new EditText(this);
+                  keyEt.setHint("貼上 Google AI Studio 的 Gemini API Key (選填)");
+                  keyEt.setText(apiKey);
+                  layout.addView(keyEt);
+          
+                  new AlertDialog.Builder(this)
+                      .setTitle("⚙️ Gemini 動態因果引擎設定")
+                      .setMessage("已內建多模型自動切換容錯（支援 gemini-2.5-flash / 2.0-flash / 3.8-flash / 4-argon 與本機因果檢核引擎）！")
+                      .setView(layout)
+                      .setPositiveButton("💾 儲存金鑰", new DialogInterface.OnClickListener() {
+                          @Override
+                          public void onClick(DialogInterface d, int w) {
+                              apiKey = keyEt.getText().toString().trim();
+                              getSharedPreferences("gemini4_rpg_v5", Context.MODE_PRIVATE)
+                                  .edit().putString("api_key", apiKey).apply();
+                              Toast.makeText(MainActivity.this, "已儲存 API Key！", Toast.LENGTH_SHORT).show();
+                          }
+                      })
+                      .setNegativeButton("關閉", null)
+                      .show();
+              }
+          
+              // ==================== 繪圖引擎（主畫面 + 自動尋路準星 + 劍氣動畫 + 巡邏怪） ====================
+              class GameView extends View {
+                  Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  Paint strokeP = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  Path path = new Path();
+                  RectF[] btnRects = new RectF[6];
+                  RectF[] titleBtns = new RectF[4];
+                  String[] btnLabels = {"◀ 左移", "▲ 上移", "▼ 下移", "▶ 右移", "💬 A 互動", "🗡️ 斬擊/脈衝"};
+                  RectF menuTopBtn = new RectF();
+                  int pressedBtn = -1;
+                  long lastHoldMoveTime = 0;
+                  long tick = 0;
+          
+                  public GameView(Context ctx) {
+                      super(ctx);
+                      strokeP.setStyle(Paint.Style.STROKE);
+                  }
+          
+                  void drawDetailedHero(Canvas c, float cx, float cy, float scale, boolean hasDrone, boolean isAllyAvatar) {
+                      float bob = (float) Math.sin(tick * 0.2f + (isAllyAvatar ? 2f : 0f)) * (scale * 0.04f);
+                      float legSwing = (float) Math.sin(walkCycle) * (scale * 0.14f);
+                      boolean hasHeavyBlade = inventory.contains("斬鐵星刃") || inventory.contains("深淵魔晶");
+                      boolean hasAegis = inventory.contains("守護紋章") || inventory.contains("高階裝甲片");
+          
+                      p.setShader(new RadialGradient(cx, cy + scale * 0.42f, scale * 0.65f,
+                          isAllyAvatar ? Color.argb(170, 16, 185, 129) : Color.argb(160, 99, 102, 241),
+                          Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                      c.drawCircle(cx, cy + scale * 0.42f, scale * 0.65f, p);
+                      p.setShader(null);
+          
+                      if (!isAllyAvatar && hasAegis) {
+                          strokeP.setColor(Color.argb(140, 251, 191, 36));
+                          strokeP.setStrokeWidth(2.5f);
+                          c.drawCircle(cx, cy, scale * 0.56f, strokeP);
+                      }
+          
+                      path.reset();
+                      float capeDir = -facingX * scale * 0.28f;
+                      float wave = (float) Math.sin(tick * 0.18f) * (scale * 0.08f);
+                      path.moveTo(cx - scale * 0.22f, cy - scale * 0.12f + bob);
+                      path.lineTo(cx + scale * 0.22f, cy - scale * 0.12f + bob);
+                      path.lineTo(cx + scale * 0.30f + capeDir + wave, cy + scale * 0.40f + bob);
+                      path.lineTo(cx - scale * 0.30f + capeDir + wave, cy + scale * 0.40f + bob);
+                      path.close();
+                      p.setColor(isAllyAvatar ? Color.rgb(5, 150, 105) : Color.rgb(190, 18, 60));
+                      c.drawPath(path, p);
+          
+                      p.setColor(Color.rgb(30, 41, 59));
+                      c.drawRoundRect(new RectF(cx - scale * 0.20f, cy + scale * 0.18f + legSwing * 0.4f, cx - scale * 0.04f, cy + scale * 0.44f + legSwing * 0.4f), 5, 5, p);
+                      c.drawRoundRect(new RectF(cx + scale * 0.04f, cy + scale * 0.18f - legSwing * 0.4f, cx + scale * 0.20f, cy + scale * 0.44f - legSwing * 0.4f), 5, 5, p);
+          
+                      RectF armor = new RectF(cx - scale * 0.25f, cy - scale * 0.14f + bob, cx + scale * 0.25f, cy + scale * 0.24f + bob);
+                      p.setShader(new LinearGradient(armor.left, armor.top, armor.right, armor.bottom,
+                          isAllyAvatar ? Color.rgb(14, 165, 233) : Color.rgb(79, 70, 229),
+                          isAllyAvatar ? Color.rgb(3, 105, 161) : Color.rgb(49, 46, 129), Shader.TileMode.CLAMP));
+                      c.drawRoundRect(armor, 8, 8, p);
+                      p.setShader(null);
+          
+                      p.setColor(Color.rgb(251, 191, 36));
+                      c.drawOval(new RectF(cx - scale * 0.34f, cy - scale * 0.16f + bob, cx - scale * 0.14f, cy - scale * 0.02f + bob), p);
+                      c.drawOval(new RectF(cx + scale * 0.14f, cy - scale * 0.16f + bob, cx + scale * 0.34f, cy - scale * 0.02f + bob), p);
+                      c.drawRect(cx - scale * 0.25f, cy + scale * 0.12f + bob, cx + scale * 0.25f, cy + scale * 0.18f + bob, p);
+          
+                      float headY = cy - scale * 0.34f + bob;
+                      float headR = scale * 0.23f;
+                      p.setColor(Color.rgb(255, 228, 196));
+                      c.drawCircle(cx, headY, headR, p);
+          
+                      float eyeOff = facingX * scale * 0.05f;
+                      p.setColor(Color.rgb(15, 23, 42));
+                      c.drawCircle(cx - scale * 0.08f + eyeOff, headY + scale * 0.02f, scale * 0.035f, p);
+                      c.drawCircle(cx + scale * 0.08f + eyeOff, headY + scale * 0.02f, scale * 0.035f, p);
+          
+                      p.setColor(isAllyAvatar ? Color.rgb(253, 230, 138) : Color.rgb(226, 232, 240));
+                      c.drawArc(new RectF(cx - headR * 1.15f, headY - headR * 1.2f, cx + headR * 1.15f, headY + headR * 0.4f), 165, 210, true, p);
+                      p.setColor(Color.rgb(251, 191, 36));
+                      c.drawRect(cx - headR * 0.7f, headY - headR * 0.65f, cx + headR * 0.7f, headY - headR * 0.42f, p);
+          
+                      RectF shield = new RectF(cx - scale * 0.44f, cy - scale * 0.08f + bob, cx - scale * 0.22f, cy + scale * 0.24f + bob);
+                      p.setColor(Color.rgb(30, 58, 138));
+                      c.drawRoundRect(shield, 6, 6, p);
+                      strokeP.setColor(Color.rgb(251, 191, 36));
+                      strokeP.setStrokeWidth(2.2f);
+                      c.drawRoundRect(shield, 6, 6, strokeP);
+          
+                      float swordX = cx + scale * 0.34f;
+                      float swordY = cy + scale * 0.06f + bob;
+                      strokeP.setColor(hasHeavyBlade && !isAllyAvatar ? Color.rgb(245, 158, 11) : (isAllyAvatar ? Color.rgb(52, 211, 153) : Color.rgb(56, 189, 248)));
+                      strokeP.setStrokeWidth(hasHeavyBlade ? 6.0f : 4.5f);
+                      c.drawLine(swordX, swordY, swordX + scale * 0.26f, swordY - scale * 0.50f, strokeP);
+                      strokeP.setColor(Color.WHITE);
+                      strokeP.setStrokeWidth(2.0f);
+                      c.drawLine(swordX, swordY, swordX + scale * 0.26f, swordY - scale * 0.50f, strokeP);
+          
+                      // 揮劍斬擊弧光動畫
+                      if (!isAllyAvatar && swordSlashAngle > 0f) {
+                          strokeP.setColor(Color.argb((int)(swordSlashAngle * 240), 253, 230, 138));
+                          strokeP.setStrokeWidth(7f);
+                          RectF slashOval = new RectF(cx - scale * 0.85f, cy - scale * 0.85f, cx + scale * 0.85f, cy + scale * 0.85f);
+                          c.drawArc(slashOval, -60, 140, false, strokeP);
+                          swordSlashAngle -= 0.22f;
+                          if (swordSlashAngle < 0f) swordSlashAngle = 0f;
+                      }
+          
+                      if (hasDrone) {
+                          float dx = cx - scale * 0.55f + (float)Math.cos(tick * 0.12f) * (scale * 0.08f);
+                          float dy = cy - scale * 0.48f + (float)Math.sin(tick * 0.15f) * (scale * 0.08f);
+                          p.setColor(Color.rgb(56, 189, 248));
+                          c.drawCircle(dx, dy, scale * 0.14f, p);
+                          p.setColor(Color.WHITE);
+                          c.drawCircle(dx, dy, scale * 0.06f, p);
+                          strokeP.setColor(Color.rgb(165, 243, 252));
+                          strokeP.setStrokeWidth(1.8f);
+                          c.drawCircle(dx, dy, scale * 0.20f, strokeP);
+                      }
+                  }
+          
+                  void drawDetailedEntity(Canvas c, Entity e, float cx, float cy, float scale) {
+                      float bob = (float) Math.sin(tick * 0.12f + e.x) * (scale * 0.04f);
+                      if ("teleport".equals(e.type)) {
+                          p.setShader(new RadialGradient(cx, cy, scale * 0.72f,
+                              Color.argb(210, 56, 189, 248), Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                          c.drawCircle(cx, cy, scale * 0.72f, p);
+                          p.setShader(null);
+                          strokeP.setColor(Color.rgb(125, 211, 252));
+                          strokeP.setStrokeWidth(3f);
+                          c.drawCircle(cx, cy, scale * 0.46f, strokeP);
+                          strokeP.setColor(Color.rgb(224, 242, 254));
+                          c.drawCircle(cx, cy, scale * 0.26f, strokeP);
+                          return;
+                      }
+                      if ("road_gate".equals(e.type) || "road_finish".equals(e.type)) {
+                          RectF arch = new RectF(cx - scale * 0.42f, cy - scale * 0.48f, cx + scale * 0.42f, cy + scale * 0.42f);
+                          p.setColor(Color.rgb(120, 53, 15));
+                          c.drawRoundRect(arch, 12, 12, p);
+                          strokeP.setColor(Color.rgb(251, 191, 36));
+                          strokeP.setStrokeWidth(3.5f);
+                          c.drawRoundRect(arch, 12, 12, strokeP);
+                          p.setColor(Color.rgb(254, 243, 199));
+                          c.drawCircle(cx, cy - scale * 0.1f, scale * 0.12f, p);
+                          return;
+                      }
+                      if ("monolith".equals(e.type)) {
+                          RectF stone = new RectF(cx - scale * 0.28f, cy - scale * 0.46f, cx + scale * 0.28f, cy + scale * 0.40f);
+                          p.setColor(Color.rgb(51, 65, 85));
+                          c.drawRoundRect(stone, 8, 8, p);
+                          strokeP.setColor(Color.rgb(56, 189, 248));
+                          strokeP.setStrokeWidth(2.5f);
+                          c.drawRoundRect(stone, 8, 8, strokeP);
+                          p.setColor(Color.rgb(56, 189, 248));
+                          c.drawCircle(cx, cy - scale * 0.1f + bob * 0.4f, scale * 0.11f, p);
+                          return;
+                      }
+                      if ("chest".equals(e.type)) {
+                          RectF box = new RectF(cx - scale * 0.36f, cy - scale * 0.22f + bob * 0.5f, cx + scale * 0.36f, cy + scale * 0.32f + bob * 0.5f);
+                          p.setColor(Color.rgb(146, 64, 14));
+                          c.drawRoundRect(box, 8, 8, p);
+                          strokeP.setColor(Color.rgb(251, 191, 36));
+                          strokeP.setStrokeWidth(3f);
+                          c.drawRoundRect(box, 8, 8, strokeP);
+                          p.setColor(Color.rgb(56, 189, 248));
+                          c.drawCircle(cx, box.centerY(), scale * 0.08f, p);
+                          return;
+                      }
+                      if ("monster".equals(e.type)) {
+                          p.setShader(new RadialGradient(cx, cy + bob, scale * 0.65f,
+                              e.stunned ? Color.argb(160, 56, 189, 248) : Color.argb(150, 244, 63, 94),
+                              Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                          c.drawCircle(cx, cy + bob, scale * 0.65f, p);
+                          p.setShader(null);
+                          p.setColor("mecha".equals(e.roleStyle) ? Color.rgb(71, 85, 105) : Color.rgb(136, 19, 55));
+                          c.drawRoundRect(new RectF(cx - scale * 0.34f, cy - scale * 0.22f + bob, cx + scale * 0.34f, cy + scale * 0.36f + bob), 10, 10, p);
+                          p.setColor(e.stunned ? Color.rgb(56, 189, 248) : Color.rgb(225, 29, 72));
+                          c.drawOval(new RectF(cx - scale * 0.48f, cy - scale * 0.24f + bob, cx - scale * 0.22f, cy + scale * 0.02f + bob), p);
+                          c.drawOval(new RectF(cx + scale * 0.22f, cy - scale * 0.24f + bob, cx + scale * 0.48f, cy + scale * 0.02f + bob), p);
+                          p.setColor(Color.rgb(251, 191, 36));
+                          c.drawCircle(cx, cy + scale * 0.08f + bob, scale * 0.09f, p);
+                          p.setColor(Color.rgb(30, 41, 59));
+                          c.drawCircle(cx, cy - scale * 0.32f + bob, scale * 0.22f, p);
+                          p.setColor(Color.rgb(254, 240, 138));
+                          c.drawRect(cx - scale * 0.14f, cy - scale * 0.35f + bob, cx - scale * 0.03f, cy - scale * 0.29f + bob, p);
+                          c.drawRect(cx + scale * 0.03f, cy - scale * 0.35f + bob, cx + scale * 0.14f, cy - scale * 0.29f + bob, p);
+                          return;
+                      }
+          
+                      p.setColor("ranger".equals(e.roleStyle) ? Color.rgb(16, 185, 129) : Color.rgb(14, 165, 233));
+                      c.drawRoundRect(new RectF(cx - scale * 0.26f, cy - scale * 0.12f + bob, cx + scale * 0.26f, cy + scale * 0.38f + bob), 10, 10, p);
+                      strokeP.setColor(Color.rgb(253, 230, 138));
+                      strokeP.setStrokeWidth(2f);
+                      c.drawLine(cx, cy - scale * 0.10f + bob, cx, cy + scale * 0.36f + bob, strokeP);
+                      p.setColor(Color.rgb(255, 228, 196));
+                      c.drawCircle(cx, cy - scale * 0.28f + bob, scale * 0.19f, p);
+                      p.setColor(Color.rgb(30, 58, 138));
+                      c.drawArc(new RectF(cx - scale * 0.24f, cy - scale * 0.52f + bob, cx + scale * 0.24f, cy - scale * 0.20f + bob), 180, 180, true, p);
+                      strokeP.setColor(Color.rgb(217, 119, 6));
+                      strokeP.setStrokeWidth(3.2f);
+                      c.drawLine(cx + scale * 0.32f, cy - scale * 0.36f + bob, cx + scale * 0.32f, cy + scale * 0.38f + bob, strokeP);
+                      p.setColor(Color.rgb(56, 189, 248));
+                      c.drawCircle(cx + scale * 0.32f, cy - scale * 0.40f + bob, scale * 0.08f, p);
+                  }
+          
+                  void drawTitleScreen(Canvas canvas, int w, int h) {
+                      p.setShader(new LinearGradient(0, 0, w, h,
+                          Color.rgb(10, 15, 32), Color.rgb(28, 22, 62), Shader.TileMode.CLAMP));
+                      canvas.drawRect(0, 0, w, h, p);
+                      p.setShader(null);
+          
+                      for (Particle pt : particles) {
+                          pt.rx += pt.vx; pt.ry += pt.vy;
+                          if (pt.ry < 0f) pt.ry = 1f;
+                          if (pt.rx < 0f) pt.rx = 1f;
+                          if (pt.rx > 1f) pt.rx = 0f;
+                          p.setColor(Color.rgb(165, 180, 252));
+                          p.setAlpha((int)(pt.alpha * 200));
+                          canvas.drawCircle(pt.rx * w, pt.ry * h, pt.size * 1.3f, p);
+                      }
+                      p.setAlpha(255);
+          
+                      float heroX = w * 0.27f, heroY = h * 0.54f;
+                      p.setShader(new RadialGradient(heroX, heroY + h * 0.12f, h * 0.28f,
+                          Color.argb(140, 99, 102, 241), Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                      canvas.drawCircle(heroX, heroY + h * 0.12f, h * 0.28f, p);
+                      p.setShader(null);
+                      drawDetailedHero(canvas, heroX, heroY, h * 0.36f, true, false);
+          
+                      p.setTypeface(Typeface.DEFAULT_BOLD);
+                      p.setTextSize(Math.max(36f, h * 0.072f));
+                      p.setColor(Color.rgb(251, 191, 36));
+                      canvas.drawText("✨ 星界迴響 2D", w * 0.46f, h * 0.20f, p);
+          
+                      p.setTextSize(Math.max(18f, h * 0.032f));
+                      p.setColor(Color.rgb(165, 180, 252));
+                      canvas.drawText("v5 自動尋路 · 等級神裝 · 區網雙人共遊版", w * 0.46f, h * 0.28f, p);
+          
+                      String[] tLabels = {
+                          "⚔️ 開始新冒險 (進入大世界)",
+                          "📂 讀取進度存檔 (1~3 槽位)",
+                          "📡 區網雙人連線 (IP: " + myLocalIp + ")",
+                          "⚙️ Gemini API 金鑰與設定"
+                      };
+                      int[] bColors = {
+                          Color.rgb(79, 70, 229),
+                          Color.rgb(14, 116, 144),
+                          Color.rgb(5, 150, 105),
+                          Color.rgb(180, 83, 9)
+                      };
+                      float bx = w * 0.46f, bw = w * 0.46f, bh = h * 0.115f;
+                      p.setTextSize(Math.max(20f, h * 0.033f));
+                      for (int i = 0; i < 4; i++) {
+                          float by = h * 0.35f + i * (bh + h * 0.032f);
+                          titleBtns[i] = new RectF(bx, by, bx + bw, by + bh);
+                          p.setColor(bColors[i]);
+                          canvas.drawRoundRect(titleBtns[i], 18, 18, p);
+                          strokeP.setColor(Color.rgb(226, 232, 240));
+                          strokeP.setStrokeWidth(2.2f);
+                          canvas.drawRoundRect(titleBtns[i], 18, 18, strokeP);
+                          p.setColor(Color.WHITE);
+                          canvas.drawText(tLabels[i], bx + 26, by + bh * 0.63f, p);
+                      }
+                  }
+          
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      super.onDraw(canvas);
+                      tick++;
+                      int w = getWidth(), h = getHeight();
+                      if (inTitleScreen) {
+                          drawTitleScreen(canvas, w, h);
+                          postInvalidateDelayed(33);
+                          return;
+                      }
+          
+                      // 處理按住方向鍵連續行走 & 點擊地面自動尋路 & 怪物巡邏 AI
+                      long now = System.currentTimeMillis();
+                      if (pressedBtn >= 0 && pressedBtn <= 3 && now - lastHoldMoveTime > 150) {
+                          lastHoldMoveTime = now;
+                          if (pressedBtn == 0) movePlayer(-1, 0, true);
+                          else if (pressedBtn == 1) movePlayer(0, -1, true);
+                          else if (pressedBtn == 2) movePlayer(0, 1, true);
+                          else if (pressedBtn == 3) movePlayer(1, 0, true);
+                      } else if (tick % 5 == 0 && (targetWalkX != -1 || targetWalkY != -1)) {
+                          stepAutoWalk();
+                      }
+                      if (tick % 24 == 0) {
+                          updateMonsterPatrols();
+                      }
+          
+                      renderPx += (px - renderPx) * 0.32f;
+                      renderPy += (py - renderPy) * 0.32f;
+                      for (Entity e : entities) {
+                          e.renderX += (e.x - e.renderX) * 0.25f;
+                          e.renderY += (e.y - e.renderY) * 0.25f;
+                      }
+                      if (isAllyOnline()) {
+                          ally.renderX += (ally.x - ally.renderX) * 0.30f;
+                          ally.renderY += (ally.y - ally.renderY) * 0.30f;
+                      }
+          
+                      p.setShader(new LinearGradient(0, 0, 0, h,
+                          Color.rgb(8, 12, 24), Color.rgb(17, 24, 39), Shader.TileMode.CLAMP));
+                      canvas.drawRect(0, 0, w, h, p);
+                      p.setShader(null);
+          
+                      int topH = (int)(h * 0.12f);
+                      int botH = (int)(h * 0.16f);
+                      int midH = h - topH - botH - 18;
+                      int mapW = (int)(w * 0.64f);
+                      float mapX = 12, mapY = topH + 8;
+          
+                      float tileW = mapW / VIEW_COLS;
+                      float tileH = midH / VIEW_ROWS;
+                      float scale = Math.min(tileW, tileH);
+          
+                      float targetCamX = Math.max(0f, Math.min(WORLD_COLS - VIEW_COLS, renderPx - VIEW_COLS / 2f + 0.5f));
+                      float targetCamY = Math.max(0f, Math.min(WORLD_ROWS - VIEW_ROWS, renderPy - VIEW_ROWS / 2f + 0.5f));
+                      camX += (targetCamX - camX) * 0.25f;
+                      camY += (targetCamY - camY) * 0.25f;
+          
+                      // 1. 頂部 HUD
+                      RectF hudRect = new RectF(12, 6, w - 12, topH);
+                      p.setColor(Color.rgb(20, 30, 55));
+                      canvas.drawRoundRect(hudRect, 16, 16, p);
+                      strokeP.setStrokeWidth(2f);
+                      strokeP.setColor(Color.rgb(99, 102, 241));
+                      canvas.drawRoundRect(hudRect, 16, 16, strokeP);
+          
+                      p.setColor(Color.WHITE);
+                      p.setTypeface(Typeface.DEFAULT_BOLD);
+                      p.setTextSize(Math.max(16f, h * 0.025f));
+                      String modeTag = isRoadMap ? "【🥾古道】" : "【" + zoneTitle + "】";
+                      String lanTag = isAllyOnline() ? " 🟢" + ally.name : "";
+                      canvas.drawText(modeTag + " Lv." + level + " ❤️" + hp + "/" + maxHp + " ✨" + mana + " ⚔️" + atk + " 🪙" + gold + lanTag, 22, topH * 0.66f, p);
+          
+                      menuTopBtn.set(w - w * 0.19f - 18, 12, w - 20, topH - 6);
+                      p.setColor(Color.rgb(217, 119, 6));
+                      canvas.drawRoundRect(menuTopBtn, 12, 12, p);
+                      p.setColor(Color.WHITE);
+                      float mw = p.measureText("💾 選單/連線");
+                      canvas.drawText("💾 選單/連線", menuTopBtn.centerX() - mw / 2, menuTopBtn.centerY() + h * 0.009f, p);
+          
+                      // 2. 繪製大世界捲動地圖
+                      canvas.save();
+                      canvas.clipRect(mapX, mapY, mapX + mapW, mapY + midH);
+          
+                      int fl1 = Color.rgb(22, 32, 58), fl2 = Color.rgb(28, 41, 72), roadCol = Color.rgb(55, 65, 88);
+                      int wallTop = Color.rgb(71, 85, 105), wallSide = Color.rgb(40, 50, 70), runeCol = Color.rgb(129, 140, 248);
+                      if ("forest".equals(biome)) {
+                          fl1 = Color.rgb(14, 42, 32); fl2 = Color.rgb(20, 54, 42); roadCol = Color.rgb(75, 85, 60);
+                          wallTop = Color.rgb(22, 101, 52); wallSide = Color.rgb(14, 65, 34); runeCol = Color.rgb(52, 211, 153);
+                      } else if ("cyber".equals(biome)) {
+                          fl1 = Color.rgb(16, 20, 48); fl2 = Color.rgb(26, 30, 68); roadCol = Color.rgb(49, 46, 129);
+                          wallTop = Color.rgb(67, 56, 202); wallSide = Color.rgb(40, 35, 130); runeCol = Color.rgb(56, 189, 248);
+                      } else if ("volcano".equals(biome)) {
+                          fl1 = Color.rgb(45, 18, 22); fl2 = Color.rgb(60, 24, 30); roadCol = Color.rgb(87, 38, 32);
+                          wallTop = Color.rgb(153, 27, 27); wallSide = Color.rgb(95, 15, 15); runeCol = Color.rgb(251, 146, 60);
+                      }
+          
+                      int startC = Math.max(0, (int)camX);
+                      int endC = Math.min(WORLD_COLS - 1, (int)(camX + VIEW_COLS + 1));
+                      int startR = Math.max(0, (int)camY);
+                      int endR = Math.min(WORLD_ROWS - 1, (int)(camY + VIEW_ROWS + 1));
+          
+                      for (int r = startR; r <= endR; r++) {
+                          for (int c = startC; c <= endC; c++) {
+                              float sx = mapX + (c - camX) * tileW;
+                              float sy = mapY + (r - camY) * tileH;
+                              RectF tr = new RectF(sx + 1, sy + 1, sx + tileW - 1, sy + tileH - 1);
+                              if (grid[r][c] == 1) {
+                                  p.setColor(wallSide);
+                                  canvas.drawRoundRect(tr, 6, 6, p);
+                                  p.setColor(wallTop);
+                                  canvas.drawRoundRect(new RectF(sx + 2, sy + 2, sx + tileW - 2, sy + tileH * 0.74f), 6, 6, p);
+                              } else if (grid[r][c] == 5) {
+                                  // 可用斬擊/脈衝震碎的裂縫秘寶牆
+                                  p.setColor(Color.rgb(120, 53, 15));
+                                  canvas.drawRoundRect(tr, 6, 6, p);
+                                  strokeP.setColor(Color.rgb(251, 191, 36));
+                                  strokeP.setStrokeWidth(2f);
+                                  canvas.drawLine(sx + 8, sy + 8, sx + tileW - 8, sy + tileH - 8, strokeP);
+                              } else if (grid[r][c] == 4) {
+                                  // 星光靈草 (踩上自動回血)
+                                  p.setColor((r + c) % 2 == 0 ? fl1 : fl2);
+                                  canvas.drawRect(tr, p);
+                                  p.setColor(Color.rgb(52, 211, 153));
+                                  canvas.drawCircle(tr.centerX(), tr.centerY(), scale * 0.22f, p);
+                                  p.setColor(Color.rgb(167, 243, 208));
+                                  canvas.drawCircle(tr.centerX(), tr.centerY(), scale * 0.10f, p);
+                              } else if (grid[r][c] == 2) {
+                                  p.setColor(fl1);
+                                  canvas.drawRect(tr, p);
+                                  p.setColor(Color.rgb(168, 85, 247));
+                                  p.setAlpha(140);
+                                  canvas.drawOval(tr, p);
+                                  p.setAlpha(255);
+                              } else if (grid[r][c] == 3) {
+                                  p.setColor(roadCol);
+                                  canvas.drawRoundRect(tr, 4, 4, p);
+                                  p.setColor(Color.argb(45, 255, 255, 255));
+                                  canvas.drawCircle(tr.centerX(), tr.centerY(), 3.5f, p);
+                              } else {
+                                  p.setColor((r + c) % 2 == 0 ? fl1 : fl2);
+                                  canvas.drawRect(tr, p);
+                              }
+                          }
+                      }
+          
+                      // 繪製自動尋路目標準星
+                      if (targetWalkX != -1 && targetWalkY != -1) {
+                          float tx = mapX + (targetWalkX - camX + 0.5f) * tileW;
+                          float ty = mapY + (targetWalkY - camY + 0.5f) * tileH;
+                          strokeP.setColor(Color.rgb(52, 211, 153));
+                          strokeP.setStrokeWidth(3f);
+                          canvas.drawCircle(tx, ty, scale * (0.28f + 0.08f * (float)Math.sin(tick * 0.25f)), strokeP);
+                      }
+          
+                      // 3. 繪製實體
+                      p.setTextSize(Math.max(15f, tileH * 0.21f));
+                      for (Entity e : entities) {
+                          if (e.x < startC - 1 || e.x > endC + 1 || e.y < startR - 1 || e.y > endR + 1) continue;
+                          float ecx = mapX + (e.renderX - camX + 0.5f) * tileW;
+                          float ecy = mapY + (e.renderY - camY + 0.5f) * tileH;
+                          drawDetailedEntity(canvas, e, ecx, ecy, scale);
+          
+                          String dispName = e.stunned ? "💫" + e.name : e.name;
+                          float tw = p.measureText(dispName);
+                          RectF tag = new RectF(ecx - tw / 2 - 8, ecy - scale * 0.75f, ecx + tw / 2 + 8, ecy - scale * 0.44f);
+                          p.setColor(Color.argb(195, 9, 13, 22));
+                          canvas.drawRoundRect(tag, 6, 6, p);
+                          p.setColor("teleport".equals(e.type) ? Color.rgb(125, 211, 252)
+                              : ("road_gate".equals(e.type) || "road_finish".equals(e.type) ? Color.rgb(253, 230, 138) : Color.WHITE));
+                          canvas.drawText(dispName, ecx - tw / 2, tag.bottom - 5, p);
+                      }
+          
+                      // 4. 繪製區網盟友與對話氣泡
+                      if (isAllyOnline()) {
+                          float acx = mapX + (ally.renderX - camX + 0.5f) * tileW;
+                          float acy = mapY + (ally.renderY - camY + 0.5f) * tileH;
+                          drawDetailedHero(canvas, acx, acy, scale, false, true);
+                          String aTag = "🤝 Lv." + ally.level + " " + ally.name;
+                          if (System.currentTimeMillis() - ally.bubbleTime < 6000 && !ally.chatBubble.isEmpty()) {
+                              aTag = "💬 " + ally.chatBubble;
+                          }
+                          float atw = p.measureText(aTag);
+                          RectF atRect = new RectF(acx - atw / 2 - 8, acy - scale * 0.82f, acx + atw / 2 + 8, acy - scale * 0.50f);
+                          p.setColor(Color.argb(210, 6, 78, 59));
+                          canvas.drawRoundRect(atRect, 6, 6, p);
+                          p.setColor(Color.rgb(167, 243, 208));
+                          canvas.drawText(aTag, acx - atw / 2, atRect.bottom - 5, p);
+                      }
+          
+                      // 5. 繪製主角與衝擊波
+                      float pcx = mapX + (renderPx - camX + 0.5f) * tileW;
+                      float pcy = mapY + (renderPy - camY + 0.5f) * tileH;
+                      if (shockwaveRadius > 0f) {
+                          strokeP.setColor(Color.argb((int)Math.max(0, 255 - shockwaveRadius * 85), 56, 189, 248));
+                          strokeP.setStrokeWidth(6f);
+                          canvas.drawCircle(pcx, pcy, shockwaveRadius * scale, strokeP);
+                          shockwaveRadius += 0.25f;
+                          if (shockwaveRadius > 2.8f) shockwaveRadius = 0f;
+                      }
+                      drawDetailedHero(canvas, pcx, pcy, scale, worldFlags.contains("TAMED_SENTINEL"), false);
+          
+                      if (System.currentTimeMillis() - myBubbleTime < 5000 && !myChatBubble.isEmpty()) {
+                          String bStr = "💬 " + myChatBubble;
+                          float btw = p.measureText(bStr);
+                          RectF bRect = new RectF(pcx - btw / 2 - 8, pcy - scale * 0.85f, pcx + btw / 2 + 8, pcy - scale * 0.52f);
+                          p.setColor(Color.argb(210, 49, 46, 129));
+                          canvas.drawRoundRect(bRect, 6, 6, p);
+                          p.setColor(Color.WHITE);
+                          canvas.drawText(bStr, pcx - btw / 2, bRect.bottom - 5, p);
+                      }
+          
+                      // 6. 浮動跳字
+                      for (int i = floatTexts.size() - 1; i >= 0; i--) {
+                          FloatText ft = floatTexts.get(i);
+                          float fx = mapX + (ft.gx - camX + 0.5f) * tileW;
+                          float fy = mapY + (ft.gy - camY + 0.1f) * tileH + ft.offsetY;
+                          p.setColor(ft.color);
+                          p.setAlpha((int)(ft.alpha * 255));
+                          float ftw = p.measureText(ft.text);
+                          canvas.drawText(ft.text, fx - ftw / 2, fy, p);
+                          ft.offsetY -= 1.5f;
+                          ft.alpha -= 0.025f;
+                          if (ft.alpha <= 0f) floatTexts.remove(i);
+                      }
+                      p.setAlpha(255);
+          
+                      // 7. 右上角小地圖 (Mini-Map)
+                      float mmW = mapW * 0.25f, mmH = midH * 0.25f;
+                      float mmX = mapX + mapW - mmW - 10, mmY = mapY + 10;
+                      p.setColor(Color.argb(190, 9, 13, 22));
+                      canvas.drawRoundRect(new RectF(mmX - 3, mmY - 3, mmX + mmW + 3, mmY + mmH + 3), 8, 8, p);
+                      float mwCell = mmW / WORLD_COLS, mhCell = mmH / WORLD_ROWS;
+                      for (int r = 0; r < WORLD_ROWS; r++) {
+                          for (int c = 0; c < WORLD_COLS; c++) {
+                              if (grid[r][c] == 1) p.setColor(Color.rgb(71, 85, 105));
+                              else if (grid[r][c] == 3) p.setColor(Color.rgb(148, 163, 184));
+                              else if (grid[r][c] == 4) p.setColor(Color.rgb(16, 185, 129));
+                              else continue;
+                              canvas.drawRect(mmX + c * mwCell, mmY + r * mhCell, mmX + (c + 1) * mwCell, mmY + (r + 1) * mhCell, p);
+                          }
+                      }
+                      for (Entity e : entities) {
+                          p.setColor("teleport".equals(e.type) ? Color.CYAN : ("road_gate".equals(e.type) || "road_finish".equals(e.type) ? Color.YELLOW : Color.RED));
+                          canvas.drawCircle(mmX + (e.x + 0.5f) * mwCell, mmY + (e.y + 0.5f) * mhCell, 3.5f, p);
+                      }
+                      if (isAllyOnline()) {
+                          p.setColor(Color.rgb(56, 189, 248));
+                          canvas.drawCircle(mmX + (ally.x + 0.5f) * mwCell, mmY + (ally.y + 0.5f) * mhCell, 4.5f, p);
+                      }
+                      p.setColor(Color.GREEN);
+                      canvas.drawCircle(mmX + (px + 0.5f) * mwCell, mmY + (py + 0.5f) * mhCell, 4.5f, p);
+          
+                      canvas.restore();
+                      strokeP.setColor(runeCol);
+                      strokeP.setStrokeWidth(2f);
+                      canvas.drawRoundRect(new RectF(mapX, mapY, mapX + mapW, mapY + midH), 12, 12, strokeP);
+          
+                      // 8. 右側因果狀態與劇情面板
+                      float sideX = mapX + mapW + 12;
+                      float sideW = w - sideX - 12;
+                      RectF sideRect = new RectF(sideX, mapY, sideX + sideW, mapY + midH);
+                      p.setColor(Color.rgb(15, 23, 42));
+                      canvas.drawRoundRect(sideRect, 14, 14, p);
+                      strokeP.setColor(Color.rgb(79, 70, 229));
+                      canvas.drawRoundRect(sideRect, 14, 14, strokeP);
+          
+                      float textY = mapY + 26;
+                      float lineStep = Math.max(20f, h * 0.031f);
+                      p.setTextSize(Math.max(15f, h * 0.022f));
+                      p.setColor(Color.rgb(251, 191, 36));
+                      textY = drawWrapped(canvas, "🎒 信物：" + inventory.toString(), sideX + 12, textY, sideW - 24, lineStep);
+                      p.setColor(Color.rgb(56, 189, 248));
+                      textY = drawWrapped(canvas, "⚖️ 生效因果：" + (worldFlags.isEmpty() ? "[初始狀態]" : worldFlags.toString()), sideX + 12, textY + 2, sideW - 24, lineStep);
+          
+                      p.setColor(Color.rgb(51, 65, 85));
+                      canvas.drawLine(sideX + 10, textY + 4, sideX + sideW - 10, textY + 4, p);
+                      textY += 14;
+          
+                      for (int i = Math.max(0, logs.size() - 5); i < logs.size(); i++) {
+                          String entry = logs.get(i);
+                          if (entry.startsWith("🎬") || entry.startsWith("🥾") || entry.startsWith("🎉")) p.setColor(Color.rgb(192, 132, 252));
+                          else if (entry.startsWith("👉") || entry.startsWith("⚔️") || entry.startsWith("🤝") || entry.startsWith("🌟") || entry.startsWith("🗡️")) p.setColor(Color.rgb(52, 211, 153));
+                          else p.setColor(Color.rgb(226, 232, 240));
+                          textY = drawWrapped(canvas, entry, sideX + 12, textY, sideW - 24, lineStep) + 5;
+                          if (textY > mapY + midH - 16) break;
+                      }
+          
+                      // 9. 底部觸控按鈕列
+                      float btnY = mapY + midH + 10;
+                      float btnW = (w - 24 - 5 * 10) / 6f;
+                      p.setTextSize(Math.max(17f, h * 0.026f));
+                      for (int i = 0; i < 6; i++) {
+                          float bx = 12 + i * (btnW + 10);
+                          float byTop = (pressedBtn == i) ? btnY + 4 : btnY;
+                          btnRects[i] = new RectF(bx, byTop, bx + btnW, h - 8);
+                          if (i == 4) p.setColor(Color.rgb(79, 70, 229));
+                          else if (i == 5) p.setColor(Color.rgb(14, 116, 144));
+                          else p.setColor(Color.rgb(30, 41, 59));
+                          canvas.drawRoundRect(btnRects[i], 14, 14, p);
+                          strokeP.setColor(Color.rgb(129, 140, 248));
+                          canvas.drawRoundRect(btnRects[i], 14, 14, strokeP);
+                          p.setColor(Color.WHITE);
+                          float bw = p.measureText(btnLabels[i]);
+                          canvas.drawText(btnLabels[i], bx + (btnW - bw) / 2, byTop + (h - 8 - byTop) * 0.62f, p);
+                      }
+          
+                      postInvalidateDelayed(33);
+                  }
+          
+                  float drawWrapped(Canvas c, String text, float x, float y, float maxW, float lineH) {
+                      String line = "";
+                      for (int i = 0; i < text.length(); i++) {
+                          char ch = text.charAt(i);
+                          if (p.measureText(line + ch) <= maxW) {
+                              line += ch;
+                          } else {
+                              c.drawText(line, x, y, p);
+                              y += lineH;
+                              line = String.valueOf(ch);
+                          }
+                      }
+                      if (!line.isEmpty()) {
+                          c.drawText(line, x, y, p);
+                          y += lineH;
+                      }
+                      return y;
+                  }
+          
+                  @Override
+                  public boolean onTouchEvent(MotionEvent ev) {
+                      float tx = ev.getX(), ty = ev.getY();
+                      if (ev.getAction() == MotionEvent.ACTION_UP || ev.getAction() == MotionEvent.ACTION_CANCEL) {
+                          pressedBtn = -1;
+                          return true;
+                      }
+                      if (ev.getAction() != MotionEvent.ACTION_DOWN) return true;
+          
+                      if (inTitleScreen) {
+                          for (int i = 0; i < 4; i++) {
+                              if (titleBtns[i] != null && titleBtns[i].contains(tx, ty)) {
+                                  if (i == 0) {
+                                      resetNewGameData();
+                                      inTitleScreen = false;
+                                  } else if (i == 1) {
+                                      openSaveLoadDialog(false);
+                                  } else if (i == 2) {
+                                      openLanDialog();
+                                  } else if (i == 3) {
+                                      openApiKeyDialog();
+                                  }
+                                  return true;
+                              }
+                          }
+                          return true;
+                      }
+          
+                      if (menuTopBtn.contains(tx, ty)) {
+                          openSystemMenuDialog();
+                          return true;
+                      }
+          
+                      for (int i = 0; i < 6; i++) {
+                          if (btnRects[i] != null && btnRects[i].contains(tx, ty)) {
+                              pressedBtn = i;
+                              lastHoldMoveTime = System.currentTimeMillis();
+                              if (i == 0) movePlayer(-1, 0, true);
+                              else if (i == 1) movePlayer(0, -1, true);
+                              else if (i == 2) movePlayer(0, 1, true);
+                              else if (i == 3) movePlayer(1, 0, true);
+                              else if (i == 4) interactNearby();
+                              else if (i == 5) performActionOrSkill();
+                              return true;
+                          }
+                      }
+                      int w = getWidth(), h = getHeight();
+                      int topH = (int)(h * 0.12f), botH = (int)(h * 0.16f);
+                      int midH = h - topH - botH - 18, mapW = (int)(w * 0.64f);
+                      float mapX = 12, mapY = topH + 8;
+                      if (tx >= mapX && tx <= mapX + mapW && ty >= mapY && ty <= mapY + midH) {
+                          float tileW = mapW / VIEW_COLS, tileH = midH / VIEW_ROWS;
+                          int gx = Math.max(0, Math.min(WORLD_COLS - 1, (int)(camX + (tx - mapX) / tileW)));
+                          int gy = Math.max(0, Math.min(WORLD_ROWS - 1, (int)(camY + (ty - mapY) / tileH)));
+                          if (gx == px && gy == py) {
+                              interactNearby();
+                          } else {
+                              // 設定自動尋路目標，主角會自動一步步走過去！
+                              targetWalkX = gx;
+                              targetWalkY = gy;
+                              stepAutoWalk();
+                          }
+                      }
+                      return true;
+                  }
+              }
+          }
+          EOF_JAVA
+          cp -f build_tmp/src/org/aether/rpg/MainActivity.java ./MainActivity.java
+          fi
+
+          cat << 'EOF' > build_tmp/res/values/strings.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">星界迴響 2D</string>
+          </resources>
+          EOF
+
+          cat << 'EOF' > build_tmp/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="org.aether.rpg"
+              android:versionCode="5"
+              android:versionName="5.0">
+              <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="33" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <application
+                  android:label="@string/app_name"
+                  android:hardwareAccelerated="true"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME/build-tools/"* | sort -V | tail -n 1)
+          PLATFORM=$(ls -d "$ANDROID_HOME/platforms/android-"* | sort -V | tail -n 1)
+
+          "$BUILD_TOOLS/aapt2" compile build_tmp/res/values/strings.xml -o build_tmp/compiled_res.zip
+          "$BUILD_TOOLS/aapt2" link -o build_tmp/unsigned.apk -I "$PLATFORM/android.jar" --manifest build_tmp/AndroidManifest.xml -R build_tmp/compiled_res.zip --auto-add-overlay
+
+          javac -encoding UTF-8 -source 8 -target 8 -cp "$PLATFORM/android.jar" -d build_tmp/obj build_tmp/src/org/aether/rpg/MainActivity.java
+          "$BUILD_TOOLS/d8" --lib "$PLATFORM/android.jar" --output build_tmp build_tmp/obj/org/aether/rpg/*.class
+
+          zip -uj build_tmp/unsigned.apk build_tmp/classes.dex
+          "$BUILD_TOOLS/zipalign" -f 4 build_tmp/unsigned.apk build_tmp/aligned.apk
+
+          keytool -genkeypair -v -keystore build_tmp/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          "$BUILD_TOOLS/apksigner" sign --ks build_tmp/debug.keystore --ks-pass pass:android --key-pass pass:android --out bin/gemini4-2d-rpg.apk build_tmp/aligned.apk
+          rm -rf build_tmp
+
+      - name: 4. 自動將 APK 放回專案首頁 (README 旁) 與 Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp -f bin/gemini4-2d-rpg.apk ./gemini4-2d-rpg.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git rm -f Mainactivity.java 2>/dev/null || true
+          git add -f gemini4-2d-rpg.apk MainActivity.java
+          git diff --staged --quiet || git commit -m "Auto-publish v5 gemini4-2d-rpg.apk & MainActivity.java [skip ci]"
+          git pull --rebase origin "${GITHUB_REF_NAME}" || true
+          git push origin HEAD:"${GITHUB_REF_NAME}"
+
+          gh release delete v1.0.0 --yes --cleanup-tag || true
+          gh release create v1.0.0 bin/gemini4-2d-rpg.apk \
+            --title "星界迴響 2D APK (v5 自動尋路/升等神裝/區網共遊版)" \
+            --notes "直接點擊下方 gemini4-2d-rpg.apk 即可下載安裝（免解壓縮）！"
